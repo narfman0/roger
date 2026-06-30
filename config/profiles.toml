@@ -56,7 +56,7 @@ require_mention = false
 
 [rooms."!nogMOAyCJDGivqjSdK:matrix.blastedstudios.com"]
 name = "Roger Test - Coding"
-require_mention = true
+require_mention = false
 # Route this room to a different LLM profile (see [profiles.*] above).
 # Defaults to "chat" when unset; overridable live with `/model <profile>`.
 profile = "reason"
