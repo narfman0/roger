@@ -102,7 +102,7 @@ better context handling, streaming, and observability.
 |---|------|--------|
 | 1 | Profile routing (per-room profile → LLM client) | ✅ Done |
 | 2 | `/model <profile>` runtime per-room switch | ✅ Done |
-| 3 | History token budgeting | ⏳ |
+| 3 | History token budgeting | ✅ Done |
 | 4 | Streaming responses (debounced ack edits) | ⏳ |
 | 5 | Metrics: request counts, latency, error rate | ⏳ |
 | 6 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | 📋 deferred |
@@ -123,3 +123,10 @@ switches it; `/model reset` reverts to the configured default. Overrides are hel
 in `ReloadableState.room_profiles` and persisted to
 `roger_session/room_profiles.json` (`RoomProfileStore`) so they survive restarts.
 On load and on reload, overrides naming an unbuilt profile are dropped.
+
+### History token budgeting (#3)
+History context is now selected by token budget instead of a fixed 20-message
+window. `HistoryStore::windowed_by_tokens` keeps the most recent messages that fit
+a budget (estimated at ~4 chars/token), always keeping the latest turn. The budget
+is derived per-room from the resolved profile's `context_tokens` (new config field,
+default 8192) minus the response reservation, system prompt, and a safety margin.

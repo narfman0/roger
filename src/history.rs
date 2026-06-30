@@ -2,6 +2,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Rough token estimate for a message body. Real tokenization is model-specific;
+/// ~4 characters per token is a decent cross-model heuristic, plus a small
+/// per-message overhead for the role wrapper.
+pub fn estimate_tokens(content: &str) -> usize {
+    content.len() / 4 + 4
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -60,6 +67,26 @@ impl HistoryStore {
         } else {
             msgs[msgs.len() - max..].to_vec()
         }
+    }
+
+    /// Returns the most recent messages whose combined estimated token count fits
+    /// within `token_budget`, in chronological order. The single most recent
+    /// message is always included even if it alone exceeds the budget, so the
+    /// user's latest turn is never dropped.
+    pub fn windowed_by_tokens(&self, room_id: &str, token_budget: usize) -> Vec<ChatMessage> {
+        let msgs = self.load(room_id);
+        let mut kept: Vec<ChatMessage> = Vec::new();
+        let mut used = 0usize;
+        for msg in msgs.into_iter().rev() {
+            let cost = estimate_tokens(&msg.content);
+            if !kept.is_empty() && used + cost > token_budget {
+                break;
+            }
+            used += cost;
+            kept.push(msg);
+        }
+        kept.reverse();
+        kept
     }
 
     pub fn clear(&self, room_id: &str) -> Result<()> {
@@ -140,5 +167,39 @@ mod tests {
         let (_dir, store) = temp_store();
         store.append("!abc/def:host.example.com", ChatMessage::user("hi")).unwrap();
         assert_eq!(store.load("!abc/def:host.example.com").len(), 1);
+    }
+
+    #[test]
+    fn test_windowed_by_tokens_keeps_recent_within_budget() {
+        let (_dir, store) = temp_store();
+        // Each body is 35 chars → estimate 35/4 + 4 = 12 tokens.
+        for i in 0..10u32 {
+            store
+                .append("!room:server", ChatMessage::user(format!("message number {:020}", i)))
+                .unwrap();
+        }
+        // Budget 40 tokens fits 3 messages (36), the 4th (48) is dropped.
+        let kept = store.windowed_by_tokens("!room:server", 40);
+        assert_eq!(kept.len(), 3);
+        // Chronological order, newest retained at the end.
+        assert!(kept.last().unwrap().content.ends_with("0000000009"));
+        assert!(kept.first().unwrap().content.ends_with("0000000007"));
+    }
+
+    #[test]
+    fn test_windowed_by_tokens_always_keeps_latest() {
+        let (_dir, store) = temp_store();
+        store
+            .append("!room:server", ChatMessage::user("x".repeat(10_000)))
+            .unwrap();
+        // Budget far too small, but the latest message must still be returned.
+        let kept = store.windowed_by_tokens("!room:server", 1);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn test_windowed_by_tokens_empty_room() {
+        let (_dir, store) = temp_store();
+        assert!(store.windowed_by_tokens("!room:server", 1000).is_empty());
     }
 }

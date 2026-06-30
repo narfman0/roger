@@ -33,6 +33,7 @@ pub struct LlmClient {
     api_key: Option<String>,
     max_tokens: u32,
     temperature: f32,
+    context_tokens: u32,
 }
 
 impl LlmClient {
@@ -42,6 +43,7 @@ impl LlmClient {
         api_key: Option<String>,
         max_tokens: u32,
         temperature: f32,
+        context_tokens: u32,
     ) -> Self {
         LlmClient {
             http: Client::new(),
@@ -50,12 +52,30 @@ impl LlmClient {
             api_key,
             max_tokens,
             temperature,
+            context_tokens,
         }
     }
 
     /// The model name this client sends requests for.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Max tokens reserved for the model's response.
+    pub fn max_tokens(&self) -> u32 {
+        self.max_tokens
+    }
+
+    /// Approximate total context window (tokens) for this model.
+    pub fn context_tokens(&self) -> u32 {
+        self.context_tokens
+    }
+
+    /// Token budget available for conversation history, after reserving space for
+    /// the system prompt and the response. Never returns less than 256.
+    pub fn history_token_budget(&self, system_prompt_tokens: usize) -> usize {
+        let reserved = self.max_tokens as usize + system_prompt_tokens + 256; // 256 = safety margin
+        (self.context_tokens as usize).saturating_sub(reserved).max(256)
     }
 
     pub async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
@@ -92,5 +112,27 @@ impl LlmClient {
             .unwrap_or_else(|| "(no response)".to_string());
 
         Ok(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(max_tokens: u32, context_tokens: u32) -> LlmClient {
+        LlmClient::new("u".into(), "m".into(), None, max_tokens, 0.0, context_tokens)
+    }
+
+    #[test]
+    fn budget_reserves_response_prompt_and_margin() {
+        // 8192 - (1024 + 100 + 256) = 6812
+        let c = client(1024, 8192);
+        assert_eq!(c.history_token_budget(100), 6812);
+    }
+
+    #[test]
+    fn budget_floors_at_256_when_context_is_tiny() {
+        let c = client(1024, 512);
+        assert_eq!(c.history_token_budget(100), 256);
     }
 }

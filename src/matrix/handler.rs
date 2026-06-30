@@ -207,8 +207,9 @@ pub async fn handle_message(
         let (client, _profile) = st.llm_for_room(&room_id);
         (client, prompt)
     };
+    let budget = llm.history_token_budget(crate::history::estimate_tokens(&system_prompt));
     let mut messages = vec![ChatMessage::system(&system_prompt)];
-    messages.extend(ctx.history.windowed(&room_id, 20));
+    messages.extend(ctx.history.windowed_by_tokens(&room_id, budget));
 
     // Call LLM with full room history
     let result = llm.chat(&messages).await;
@@ -372,6 +373,7 @@ mod tests {
             None,
             128,
             0.0,
+            8192,
         ))
     }
 

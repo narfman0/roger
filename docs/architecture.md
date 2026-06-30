@@ -23,6 +23,15 @@ On first login, roger saves `roger_session/session.json` (access_token, device_i
 
 History is room-scoped by default. No cross-room sharing (each room has independent context).
 
+### Token budgeting
+
+Context is selected by token budget rather than a fixed message count.
+`windowed_by_tokens` walks history newest-first, keeping messages until an
+estimated token budget is hit (~4 chars/token heuristic via `estimate_tokens`);
+the latest turn is always kept. The budget is
+`context_tokens − max_tokens − system_prompt − 256 margin` (floored at 256),
+where `context_tokens` is a per-profile config value (default 8192).
+
 ## Response UX
 
 For every response:

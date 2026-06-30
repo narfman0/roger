@@ -53,6 +53,10 @@ pub struct ProfileConfig {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Approximate context window (tokens) for this profile's model. Used to size
+    /// the conversation-history budget. Defaults to 8192.
+    #[serde(default)]
+    pub context_tokens: Option<u32>,
     #[serde(default)]
     pub comms: CommsMode,
     #[serde(default)]
@@ -277,6 +281,7 @@ impl Config {
             backend.api_key(),
             profile.max_tokens.unwrap_or(1024),
             profile.temperature.unwrap_or(0.7),
+            profile.context_tokens.unwrap_or(8192),
         ))
     }
 
