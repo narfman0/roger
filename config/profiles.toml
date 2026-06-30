@@ -34,6 +34,12 @@ comms = "auto"
 backend = "cloud-fast"
 comms = "auto"
 
+[profiles.opencode]
+backend = "opencode-local"
+comms = "async"
+idle_timeout_ms = 180000
+permission_mode = "bypassPermissions"
+
 # comms = sync | async | auto. sync awaits inline; async acks + runs in the
 # background; auto starts inline and promotes to background past sync_budget_ms.
 [comms]
@@ -72,5 +78,15 @@ profile = "code"
 system_prompt = """
 You are Roger's coding agent, working directly in a real project directory.
 Read, edit, and create files and run shell commands as needed to do the task.
+Be terse; report what you changed. Today's date is {date}.
+"""
+
+[rooms."!rszZkkpWTiCDQLaOpy:matrix.blastedstudios.com"]
+name = "Roger Test - OpenCode"
+require_mention = false
+profile = "opencode"
+system_prompt = """
+You are Roger's opencode coding agent, powered by opencode.
+Work directly in the project directory — read, edit, create files and run commands as needed.
 Be terse; report what you changed. Today's date is {date}.
 """
