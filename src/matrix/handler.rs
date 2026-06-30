@@ -10,12 +10,15 @@ use matrix_sdk::{
     event_handler::Ctx,
     media::{MediaFormat, MediaRequestParameters},
     room::Room,
-    ruma::events::room::{
-        member::{MembershipState, StrippedRoomMemberEvent},
-        message::{
-            AudioMessageEventContent, MessageType, OriginalSyncRoomMessageEvent,
-            ReplacementMetadata, RoomMessageEventContent,
+    ruma::{
+        events::room::{
+            member::{MembershipState, StrippedRoomMemberEvent},
+            message::{
+                AudioMessageEventContent, MessageType, OriginalSyncRoomMessageEvent,
+                ReplacementMetadata, RoomMessageEventContent,
+            },
         },
+        OwnedEventId,
     },
     Client,
 };
@@ -27,9 +30,23 @@ use std::{
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-/// Minimum gap between in-place ack edits while streaming a response, so a fast
-/// token stream doesn't spam the room with edit events.
+/// Minimum gap between in-place edits while streaming a response, so a fast token
+/// stream doesn't spam the room with edit events.
 const STREAM_EDIT_DEBOUNCE_MS: u64 = 700;
+
+/// Don't post the first message until at least this many characters have streamed
+/// in (or the stream ends). The Matrix typing indicator covers the gap, so there's
+/// no placeholder message — the first thing the user sees is real content.
+const FIRST_PAINT_MIN_CHARS: usize = 24;
+
+/// Edit a previously sent message in place via an `m.replace` relation.
+async fn edit_message(room: &Room, id: OwnedEventId, text: &str) {
+    let edited = RoomMessageEventContent::text_plain(text)
+        .make_replacement(ReplacementMetadata::new(id, None), None);
+    if let Err(e) = room.send(edited).await {
+        warn!("failed to edit message: {}", e);
+    }
+}
 
 /// Config that can be swapped at runtime on SIGHUP without restarting the bot.
 /// Everything reachable behind `BotCtx::state` is reloadable; fields directly on
@@ -172,35 +189,16 @@ pub async fn handle_message(
 
     info!(room = %room_id, sender = %event.sender, "processing: {}", body);
 
-    // Handle slash commands without touching the LLM
+    // Handle slash commands without touching the LLM — reply directly, no placeholder.
     if let Some(cmd_reply) = handle_slash_command(&body, &room_id, &ctx).await {
-        let _ = room.typing_notice(true).await;
-        let ack_id = match room.send(RoomMessageEventContent::text_plain("…")).await {
-            Ok(resp) => resp.event_id,
-            Err(e) => { warn!("failed to send cmd ack: {}", e); return; }
-        };
-        let _ = room.typing_notice(false).await;
-        let edited = RoomMessageEventContent::text_plain(&cmd_reply)
-            .make_replacement(ReplacementMetadata::new(ack_id, None), None);
-        let _ = room.send(edited).await;
+        if let Err(e) = room.send(RoomMessageEventContent::text_plain(&cmd_reply)).await {
+            warn!("failed to send command reply: {}", e);
+        }
         return;
     }
 
-    // Send typing indicator
+    // Show the typing indicator while we wait for the model — no placeholder message.
     let _ = room.typing_notice(true).await;
-
-    // Send immediate ack so the user sees activity right away
-    let ack_id = match room
-        .send(RoomMessageEventContent::text_plain("Working on it…"))
-        .await
-    {
-        Ok(resp) => resp.event_id,
-        Err(e) => {
-            warn!("failed to send ack: {}", e);
-            let _ = room.typing_notice(false).await;
-            return;
-        }
-    };
 
     // Build context: system prompt + history + current message.
     // Snapshot the reloadable bits (LLM client + resolved system prompt) and drop
@@ -223,8 +221,10 @@ pub async fn handle_message(
     let mut messages = vec![ChatMessage::system(&system_prompt)];
     messages.extend(ctx.history.windowed_by_tokens(&room_id, budget));
 
-    // Stream the LLM response, editing the ack in place as tokens arrive
-    // (debounced to avoid flooding the room with edit events).
+    // Stream the LLM response. We hold off posting anything until enough has
+    // streamed in (FIRST_PAINT_MIN_CHARS), then send that as the real first
+    // message and edit it in place as more arrives (debounced). The typing
+    // indicator covers the wait, so there's no "Working on it…" placeholder.
     let req_start = Instant::now();
     let (tx, mut rx) = mpsc::channel::<String>(64);
     let stream_handle = {
@@ -234,17 +234,32 @@ pub async fn handle_message(
     };
 
     let debounce = Duration::from_millis(STREAM_EDIT_DEBOUNCE_MS);
+    let mut msg_id: Option<OwnedEventId> = None;
     let mut last_edit: Option<Instant> = None;
     let mut shown = String::new();
     while let Some(acc) = rx.recv().await {
-        if acc != shown && last_edit.map_or(true, |t| t.elapsed() >= debounce) {
-            shown = acc;
-            let edited = RoomMessageEventContent::text_plain(&shown)
-                .make_replacement(ReplacementMetadata::new(ack_id.clone(), None), None);
-            if let Err(e) = room.send(edited).await {
-                warn!("failed to edit ack mid-stream: {}", e);
+        match &msg_id {
+            // Not posted yet: wait until there's enough to show, then send it.
+            None => {
+                if acc.chars().count() >= FIRST_PAINT_MIN_CHARS {
+                    match room.send(RoomMessageEventContent::text_plain(&acc)).await {
+                        Ok(resp) => {
+                            msg_id = Some(resp.event_id);
+                            shown = acc;
+                            last_edit = Some(Instant::now());
+                        }
+                        Err(e) => warn!("failed to send first response message: {}", e),
+                    }
+                }
             }
-            last_edit = Some(Instant::now());
+            // Already posted: edit in place, debounced.
+            Some(id) => {
+                if acc != shown && last_edit.map_or(true, |t| t.elapsed() >= debounce) {
+                    shown = acc;
+                    edit_message(&room, id.clone(), &shown).await;
+                    last_edit = Some(Instant::now());
+                }
+            }
         }
     }
 
@@ -276,25 +291,36 @@ pub async fn handle_message(
         "responded"
     );
 
-    match result {
+    // Render the final text: edit the message in place if we already posted one,
+    // otherwise send it fresh (short responses that never hit the paint threshold).
+    let final_text = match result {
         Ok(reply) => {
             if let Err(e) = ctx.history.append(&room_id, ChatMessage::assistant(&reply)) {
                 warn!("failed to save assistant reply to history: {}", e);
             }
-
-            let edited = RoomMessageEventContent::text_plain(&reply)
-                .make_replacement(ReplacementMetadata::new(ack_id, None), None);
-
-            if let Err(e) = room.send(edited).await {
-                warn!("failed to edit ack with reply: {}", e);
-            }
+            reply
         }
         Err(e) => {
             warn!("LLM error: {}", e);
-            let error_text = format!("Sorry, I hit an error: {}", e);
-            let edited = RoomMessageEventContent::text_plain(&error_text)
-                .make_replacement(ReplacementMetadata::new(ack_id, None), None);
-            let _ = room.send(edited).await;
+            format!("Sorry, I hit an error: {}", e)
+        }
+    };
+
+    match msg_id {
+        Some(id) => {
+            if final_text != shown {
+                edit_message(&room, id, &final_text).await;
+            }
+        }
+        None => {
+            let text = if final_text.trim().is_empty() {
+                "(no response)".to_string()
+            } else {
+                final_text
+            };
+            if let Err(e) = room.send(RoomMessageEventContent::text_plain(&text)).await {
+                warn!("failed to send response: {}", e);
+            }
         }
     }
 }

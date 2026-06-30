@@ -36,16 +36,22 @@ where `context_tokens` is a per-profile config value (default 8192).
 
 For every response:
 1. `room.typing_notice(true)` — shows the typing indicator in Matrix clients
-2. Send "Working on it…" immediately — user sees activity before LLM responds
-3. Stream the LLM response (`LlmClient::chat_stream`): SSE deltas are accumulated
-   and pushed over an mpsc channel; the handler edits the ack in place via
-   `m.replace` as text grows, debounced to one edit per `STREAM_EDIT_DEBOUNCE_MS`
-   (700ms) so a fast stream doesn't flood the room with edit events
-4. Final edit with the complete reply; `room.typing_notice(false)`
+2. Stream the LLM response (`ProfileLlm::chat_stream`): SSE deltas are accumulated
+   and pushed over an mpsc channel. Nothing is posted until at least
+   `FIRST_PAINT_MIN_CHARS` (24) have streamed in — then the accumulated text is
+   sent as the real first message. There is no placeholder; the typing indicator
+   covers the wait.
+3. As more text arrives, the message is edited in place via `m.replace`, debounced
+   to one edit per `STREAM_EDIT_DEBOUNCE_MS` (700ms) so a fast stream doesn't flood
+   the room with edit events.
+4. Final render: edit the message with the complete reply (if it changed), or — for
+   a short response that never crossed the paint threshold — send it as a single
+   fresh message. `room.typing_notice(false)`.
 
 If the stream errors or yields no content (e.g. a backend without SSE support),
 the handler falls back to a single non-streaming `chat()` call. Only the `content`
-field is surfaced — reasoning-model `reasoning` deltas are ignored.
+field is surfaced — reasoning-model `reasoning` deltas are ignored. Slash commands
+reply directly with a single message (no streaming, no placeholder).
 
 ## Audio pipeline
 

@@ -58,12 +58,14 @@ restart. See `docs/architecture.md` → Config hot-reload.
 
 Never commit `.env` or `backends.*.toml` (except `backends.example.toml`).
 
-## Message edit flow
+## Message / streaming flow
 
-1. Typing indicator sent
-2. "Working on it…" message sent immediately (saves the event ID)
-3. LLM called with last 20 messages of room history
-4. Ack message edited in-place via `m.replace` with final reply
+1. Typing indicator sent (no placeholder message)
+2. Response is streamed; the first message is posted only once
+   `FIRST_PAINT_MIN_CHARS` have buffered, then edited in place via `m.replace` as
+   more arrives (debounced). Short replies are sent as a single message.
+3. See `docs/architecture.md` → Response UX for the full flow (fallback, slash
+   commands, token budgeting).
 
 ## Adding a new backend kind
 
