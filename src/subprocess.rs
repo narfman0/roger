@@ -192,6 +192,28 @@ impl SubprocessBackend {
             }
         }
 
+        // Augment PATH so subprocess tools installed in non-standard locations
+        // (e.g. ~/.opencode/bin, ~/.local/bin, ~/go/bin) are found even when
+        // roger was started without those dirs on its PATH.
+        {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let home = std::env::var("HOME").unwrap_or_default();
+            let extra = [
+                format!("{}/.opencode/bin", home),
+                format!("{}/.local/bin", home),
+                format!("{}/.cargo/bin", home),
+                format!("{}/go/bin", home),
+                format!("{}/bin", home),
+            ]
+            .into_iter()
+            .filter(|p| !current_path.contains(p.as_str()))
+            .collect::<Vec<_>>()
+            .join(":");
+            if !extra.is_empty() {
+                cmd.env("PATH", format!("{}:{}", extra, current_path));
+            }
+        }
+
         cmd.current_dir(&workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
