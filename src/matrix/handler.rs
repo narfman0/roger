@@ -30,14 +30,31 @@ use std::{
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-/// Minimum gap between in-place edits while streaming a response, so a fast token
-/// stream doesn't spam the room with edit events.
-const STREAM_EDIT_DEBOUNCE_MS: u64 = 700;
+/// Streaming flush cadence. We post/update the response when a sentence completes
+/// OR `MAX_FLUSH_WAIT_MS` has passed since the last update (whichever first), but
+/// never more often than `MIN_FLUSH_GAP_MS`. The typing indicator covers the gap
+/// before the first flush, so there's no placeholder message.
+const MIN_FLUSH_GAP_MS: u64 = 250;
+const MAX_FLUSH_WAIT_MS: u64 = 1000;
 
-/// Don't post the first message until at least this many characters have streamed
-/// in (or the stream ends). The Matrix typing indicator covers the gap, so there's
-/// no placeholder message — the first thing the user sees is real content.
-const FIRST_PAINT_MIN_CHARS: usize = 24;
+/// Byte index of the last sentence-ending boundary in `s` (`.`, `!`, `?`, or a
+/// newline), if any.
+fn last_sentence_end(s: &str) -> Option<usize> {
+    s.rfind(|c: char| matches!(c, '.' | '!' | '?' | '\n'))
+}
+
+/// Decide whether to flush a streamed update. Flush when the text changed, the
+/// rate floor has passed, and either a new sentence boundary appeared or the time
+/// ceiling was reached.
+fn should_flush(
+    changed: bool,
+    elapsed: Duration,
+    sentence_ready: bool,
+    min_gap: Duration,
+    max_wait: Duration,
+) -> bool {
+    changed && elapsed >= min_gap && (sentence_ready || elapsed >= max_wait)
+}
 
 /// Edit a previously sent message in place via an `m.replace` relation.
 async fn edit_message(room: &Room, id: OwnedEventId, text: &str) {
@@ -221,9 +238,9 @@ pub async fn handle_message(
     let mut messages = vec![ChatMessage::system(&system_prompt)];
     messages.extend(ctx.history.windowed_by_tokens(&room_id, budget));
 
-    // Stream the LLM response. We hold off posting anything until enough has
-    // streamed in (FIRST_PAINT_MIN_CHARS), then send that as the real first
-    // message and edit it in place as more arrives (debounced). The typing
+    // Stream the LLM response. We flush (post the first message, then edit it in
+    // place) on sentence boundaries or once MAX_FLUSH_WAIT_MS passes — whichever
+    // comes first — but never more often than MIN_FLUSH_GAP_MS. The typing
     // indicator covers the wait, so there's no "Working on it…" placeholder.
     let req_start = Instant::now();
     let (tx, mut rx) = mpsc::channel::<String>(64);
@@ -233,34 +250,30 @@ pub async fn handle_message(
         tokio::spawn(async move { llm.chat_stream(&messages, tx).await })
     };
 
-    let debounce = Duration::from_millis(STREAM_EDIT_DEBOUNCE_MS);
+    let min_gap = Duration::from_millis(MIN_FLUSH_GAP_MS);
+    let max_wait = Duration::from_millis(MAX_FLUSH_WAIT_MS);
     let mut msg_id: Option<OwnedEventId> = None;
-    let mut last_edit: Option<Instant> = None;
+    let mut last_flush: Option<Instant> = None;
     let mut shown = String::new();
     while let Some(acc) = rx.recv().await {
-        match &msg_id {
-            // Not posted yet: wait until there's enough to show, then send it.
-            None => {
-                if acc.chars().count() >= FIRST_PAINT_MIN_CHARS {
-                    match room.send(RoomMessageEventContent::text_plain(&acc)).await {
-                        Ok(resp) => {
-                            msg_id = Some(resp.event_id);
-                            shown = acc;
-                            last_edit = Some(Instant::now());
-                        }
-                        Err(e) => warn!("failed to send first response message: {}", e),
-                    }
-                }
-            }
-            // Already posted: edit in place, debounced.
-            Some(id) => {
-                if acc != shown && last_edit.map_or(true, |t| t.elapsed() >= debounce) {
-                    shown = acc;
-                    edit_message(&room, id.clone(), &shown).await;
-                    last_edit = Some(Instant::now());
-                }
-            }
+        // Time since the last flush, or since the request started for the first one.
+        let elapsed = last_flush.unwrap_or(req_start).elapsed();
+        let sentence_ready = last_sentence_end(&acc).map_or(false, |i| i >= shown.len());
+        if !should_flush(acc != shown, elapsed, sentence_ready, min_gap, max_wait) {
+            continue;
         }
+        match &msg_id {
+            None => match room.send(RoomMessageEventContent::text_plain(&acc)).await {
+                Ok(resp) => msg_id = Some(resp.event_id),
+                Err(e) => {
+                    warn!("failed to send first response message: {}", e);
+                    continue;
+                }
+            },
+            Some(id) => edit_message(&room, id.clone(), &acc).await,
+        }
+        shown = acc;
+        last_flush = Some(Instant::now());
     }
 
     let streamed = stream_handle.await;
@@ -582,6 +595,43 @@ mod tests {
             "reason"
         );
         assert!(ctx.room_profiles.load().is_empty());
+    }
+
+    #[test]
+    fn last_sentence_end_finds_boundaries() {
+        assert_eq!(last_sentence_end("no boundary here"), None);
+        assert_eq!(last_sentence_end("Hello there."), Some(11));
+        // Returns the *last* boundary.
+        assert_eq!(last_sentence_end("One. Two!"), Some(8));
+        assert!(last_sentence_end("line one\nline two").is_some());
+    }
+
+    #[test]
+    fn should_flush_respects_rate_floor() {
+        let min = Duration::from_millis(250);
+        let max = Duration::from_millis(1000);
+        // Sentence ready but too soon since last flush → no.
+        assert!(!should_flush(true, Duration::from_millis(100), true, min, max));
+        // Sentence ready and past the floor → yes.
+        assert!(should_flush(true, Duration::from_millis(300), true, min, max));
+    }
+
+    #[test]
+    fn should_flush_time_ceiling_without_sentence() {
+        let min = Duration::from_millis(250);
+        let max = Duration::from_millis(1000);
+        // No sentence, under the ceiling → no.
+        assert!(!should_flush(true, Duration::from_millis(500), false, min, max));
+        // No sentence, but ceiling reached → yes.
+        assert!(should_flush(true, Duration::from_millis(1000), false, min, max));
+    }
+
+    #[test]
+    fn should_flush_requires_change() {
+        let min = Duration::from_millis(250);
+        let max = Duration::from_millis(1000);
+        // Unchanged text never flushes, even past the ceiling.
+        assert!(!should_flush(false, Duration::from_secs(5), true, min, max));
     }
 
     #[tokio::test]

@@ -61,9 +61,9 @@ Never commit `.env` or `backends.*.toml` (except `backends.example.toml`).
 ## Message / streaming flow
 
 1. Typing indicator sent (no placeholder message)
-2. Response is streamed; the first message is posted only once
-   `FIRST_PAINT_MIN_CHARS` have buffered, then edited in place via `m.replace` as
-   more arrives (debounced). Short replies are sent as a single message.
+2. Response is streamed; flushed (first post, then in-place `m.replace` edits) on
+   sentence boundaries or a 1s ceiling, whichever first, never faster than 250ms.
+   Short replies are sent as a single message.
 3. See `docs/architecture.md` → Response UX for the full flow (fallback, slash
    commands, token budgeting).
 

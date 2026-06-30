@@ -37,16 +37,16 @@ where `context_tokens` is a per-profile config value (default 8192).
 For every response:
 1. `room.typing_notice(true)` — shows the typing indicator in Matrix clients
 2. Stream the LLM response (`ProfileLlm::chat_stream`): SSE deltas are accumulated
-   and pushed over an mpsc channel. Nothing is posted until at least
-   `FIRST_PAINT_MIN_CHARS` (24) have streamed in — then the accumulated text is
-   sent as the real first message. There is no placeholder; the typing indicator
-   covers the wait.
-3. As more text arrives, the message is edited in place via `m.replace`, debounced
-   to one edit per `STREAM_EDIT_DEBOUNCE_MS` (700ms) so a fast stream doesn't flood
-   the room with edit events.
-4. Final render: edit the message with the complete reply (if it changed), or — for
-   a short response that never crossed the paint threshold — send it as a single
-   fresh message. `room.typing_notice(false)`.
+   and pushed over an mpsc channel. The handler flushes (posts the first message,
+   then edits it in place via `m.replace`) when a **sentence boundary** appears OR
+   `MAX_FLUSH_WAIT_MS` (1s) has passed since the last flush — whichever comes
+   first — but never more often than `MIN_FLUSH_GAP_MS` (250ms). The flush decision
+   is `should_flush()`; sentence boundaries are found by `last_sentence_end()`.
+   There is no placeholder; the typing indicator covers the wait before the first
+   flush.
+3. Final render: edit the message with the complete reply (if it changed), or — for
+   a short response that never triggered a flush — send it as a single fresh
+   message. `room.typing_notice(false)`.
 
 If the stream errors or yields no content (e.g. a backend without SSE support),
 the handler falls back to a single non-streaming `chat()` call. Only the `content`
