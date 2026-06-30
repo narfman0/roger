@@ -557,6 +557,7 @@ mod tests {
             state: Arc::new(RwLock::new(state())),
             room_profiles: Arc::new(RoomProfileStore::new(dir.path().join("rp.json"))),
             metrics: Arc::new(Metrics::default()),
+            tool_executor: Arc::new(ToolExecutor::new(None)),
         }
     }
 

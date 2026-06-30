@@ -11,7 +11,7 @@ mod tools;
 use anyhow::Result;
 use matrix_sdk::config::SyncSettings;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -22,12 +22,36 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use crate::config::Config;
 use crate::matrix::handler::{BotCtx, ReloadableState};
 
+/// Resolve roger's state directory: `ROGER_STATE_DIR` if set, else `~/.roger`.
+/// A leading `~/` (or a bare `~`) is expanded against `$HOME`. This holds all
+/// mutable state (crypto store, session token, history, logs, room overrides),
+/// kept separate from the install location and from any agent working directory.
+fn resolve_state_dir() -> PathBuf {
+    let raw = std::env::var("ROGER_STATE_DIR").unwrap_or_else(|_| "~/.roger".to_string());
+    expand_tilde(&raw)
+}
+
+/// Expand a leading `~/` or bare `~` against `$HOME`; otherwise return as-is.
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        if path == "~" {
+            return PathBuf::from(home);
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
 /// Initialize tracing: human-readable to stderr, JSON with daily rotation to a
-/// log directory (`ROGER_LOG_DIR`, default `roger_session/logs`). The returned
+/// log directory (`ROGER_LOG_DIR`, default `<state_dir>/logs`). The returned
 /// guard must be kept alive for the lifetime of the process so the non-blocking
 /// writer flushes on shutdown.
-fn init_logging() -> WorkerGuard {
-    let log_dir = std::env::var("ROGER_LOG_DIR").unwrap_or_else(|_| "roger_session/logs".into());
+fn init_logging(state_dir: &Path) -> WorkerGuard {
+    let log_dir = std::env::var("ROGER_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| state_dir.join("logs"));
     let file_appender = tracing_appender::rolling::daily(&log_dir, "roger.log");
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -90,7 +114,11 @@ async fn reload_on_sighup(config_dir: PathBuf, state: Arc<RwLock<ReloadableState
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _log_guard = init_logging();
+    let state_dir = resolve_state_dir();
+    std::fs::create_dir_all(&state_dir)?;
+    let _log_guard = init_logging(&state_dir);
+
+    info!("state dir: {}", state_dir.display());
 
     let config_dir = PathBuf::from("config");
     let cfg = Config::load(&config_dir)?;
@@ -122,7 +150,7 @@ async fn main() -> Result<()> {
         info!("SEARXNG_URL not set — web_search will return an error when called");
     }
 
-    let session_dir = PathBuf::from("roger_session");
+    let session_dir = state_dir;
     let client = matrix::client::build_client(&cfg.matrix_homeserver, &session_dir).await?;
     matrix::client::login(&client, &cfg.matrix_user, &cfg.matrix_password, &session_dir).await?;
 
