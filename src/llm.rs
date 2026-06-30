@@ -93,16 +93,6 @@ impl LlmClient {
         &self.model
     }
 
-    /// Max tokens reserved for the model's response.
-    pub fn max_tokens(&self) -> u32 {
-        self.max_tokens
-    }
-
-    /// Approximate total context window (tokens) for this model.
-    pub fn context_tokens(&self) -> u32 {
-        self.context_tokens
-    }
-
     /// Token budget available for conversation history, after reserving space for
     /// the system prompt and the response. Never returns less than 256.
     pub fn history_token_budget(&self, system_prompt_tokens: usize) -> usize {
