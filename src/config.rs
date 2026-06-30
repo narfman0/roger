@@ -2,8 +2,22 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use chrono::Local;
+
+/// Expand a leading `~/` or bare `~` against `$HOME`; otherwise return as-is.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        if path == "~" {
+            return PathBuf::from(home);
+        }
+        if let Some(rest) = path.strip_prefix("~/") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -67,6 +81,15 @@ pub struct ProfileConfig {
     pub latency_class: LatencyClass,
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
+    /// Subprocess backends only: `--permission-mode` (default "acceptEdits").
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Subprocess backends only: `--max-budget-usd` cost guard.
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+    /// Subprocess backends only: `--max-turns` cap.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +126,10 @@ pub struct CommsConfig {
     pub max_concurrent_children: usize,
     #[serde(default = "default_edit_debounce")]
     pub edit_debounce_ms: u64,
+    /// Fallback working directory for agentic subprocess backends when no workdir
+    /// has been identified for the room. `~` is expanded.
+    #[serde(default)]
+    pub default_workdir: Option<String>,
 }
 
 fn default_sync_budget() -> u64 { 7000 }
@@ -121,6 +148,7 @@ impl Default for CommsConfig {
             soft_worker_cap: default_soft_worker_cap(),
             max_concurrent_children: default_max_concurrent_children(),
             edit_debounce_ms: default_edit_debounce(),
+            default_workdir: None,
         }
     }
 }
@@ -267,27 +295,65 @@ impl Config {
         })
     }
 
-    /// Build one LLM client for a named backend, applying the given profile's
-    /// generation params (temperature, max_tokens, context_tokens).
+    /// Build one backend for a named backend config, applying the given profile's
+    /// params. Dispatches on `kind`: OpenAI-compatible HTTP, or an agentic
+    /// subprocess (`claude-code` / `opencode`).
     fn build_client(
         &self,
         backend_name: &str,
         profile: &ProfileConfig,
-    ) -> anyhow::Result<crate::llm::LlmClient> {
+    ) -> anyhow::Result<crate::llm::Backend> {
         let backend = self.backends.get(backend_name)
             .ok_or_else(|| anyhow::anyhow!("unknown backend '{}'", backend_name))?;
-        let base_url = format!(
-            "{}/v1",
-            backend.base_url.trim_end_matches('/').trim_end_matches("/v1")
-        );
-        Ok(crate::llm::LlmClient::new(
-            base_url,
-            backend.model.clone(),
-            backend.api_key(),
-            profile.max_tokens.unwrap_or(1024),
-            profile.temperature.unwrap_or(0.7),
-            profile.context_tokens.unwrap_or(8192),
-        ))
+
+        match backend.kind {
+            BackendKind::OpenAi => {
+                let base_url = format!(
+                    "{}/v1",
+                    backend.base_url.trim_end_matches('/').trim_end_matches("/v1")
+                );
+                Ok(crate::llm::Backend::Http(crate::llm::LlmClient::new(
+                    base_url,
+                    backend.model.clone(),
+                    backend.api_key(),
+                    profile.max_tokens.unwrap_or(1024),
+                    profile.temperature.unwrap_or(0.7),
+                    profile.context_tokens.unwrap_or(8192),
+                )))
+            }
+            BackendKind::ClaudeCode | BackendKind::OpenCode => {
+                use crate::subprocess::{ProcLimits, SubprocessBackend, SubprocessKind};
+                let flavor = if backend.kind == BackendKind::ClaudeCode {
+                    SubprocessKind::ClaudeCode
+                } else {
+                    SubprocessKind::OpenCode
+                };
+                // ANTHROPIC_BASE_URL is the gateway host (no /v1 suffix).
+                let base_url = backend.base_url.trim_end_matches('/').to_string();
+                let workdir = self.comms.default_workdir.as_deref().map(expand_tilde);
+                let limits = ProcLimits {
+                    idle: Duration::from_millis(
+                        profile.idle_timeout_ms.unwrap_or(self.comms.idle_timeout_ms),
+                    ),
+                    ceiling: Duration::from_millis(self.comms.absolute_ceiling_ms),
+                    max_budget_usd: profile.max_budget_usd,
+                    max_turns: profile.max_turns,
+                };
+                Ok(crate::llm::Backend::Subprocess(SubprocessBackend::new(
+                    flavor,
+                    backend.model.clone(),
+                    base_url,
+                    backend.api_key(),
+                    workdir,
+                    Vec::new(), // extra_dirs (known projects) wired in 4.5.4
+                    profile
+                        .permission_mode
+                        .clone()
+                        .unwrap_or_else(|| "acceptEdits".to_string()),
+                    limits,
+                )))
+            }
+        }
     }
 
     /// Build the `ProfileLlm` for a named profile: its primary backend followed by
@@ -302,7 +368,7 @@ impl Config {
         let mut clients = Vec::new();
         for name in &names {
             match self.build_client(name, profile) {
-                Ok(c) => clients.push(std::sync::Arc::new(crate::llm::Backend::Http(c))),
+                Ok(c) => clients.push(std::sync::Arc::new(c)),
                 Err(e) => {
                     tracing::warn!("profile '{}': skipping backend '{}': {}", profile_name, name, e)
                 }

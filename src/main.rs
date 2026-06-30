@@ -6,6 +6,7 @@ mod llm;
 mod matrix;
 mod metrics;
 mod room_profiles;
+mod subprocess;
 mod tools;
 
 use anyhow::Result;
@@ -28,20 +29,7 @@ use crate::matrix::handler::{BotCtx, ReloadableState};
 /// kept separate from the install location and from any agent working directory.
 fn resolve_state_dir() -> PathBuf {
     let raw = std::env::var("ROGER_STATE_DIR").unwrap_or_else(|_| "~/.roger".to_string());
-    expand_tilde(&raw)
-}
-
-/// Expand a leading `~/` or bare `~` against `$HOME`; otherwise return as-is.
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        if path == "~" {
-            return PathBuf::from(home);
-        }
-        if let Some(rest) = path.strip_prefix("~/") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
+    crate::config::expand_tilde(&raw)
 }
 
 /// Initialize tracing: human-readable to stderr, JSON with daily rotation to a
@@ -125,6 +113,9 @@ async fn main() -> Result<()> {
 
     info!("roger starting — homeserver: {}", cfg.matrix_homeserver);
     info!("allowlist: {:?}", cfg.room_allowlist);
+
+    // Process-wide cap on concurrent subprocess children (set once; survives reloads).
+    subprocess::set_child_limit(cfg.comms.max_concurrent_children);
 
     // Build an LLM per profile (primary + fallbacks; chat required)
     let llms: HashMap<String, Arc<llm::ProfileLlm>> = cfg

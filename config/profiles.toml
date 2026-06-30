@@ -15,11 +15,17 @@ backend = "cloud-fast"
 comms = "sync"
 latency_class = "fast"
 
+# cloud-heavy is a kind = "claude-code" backend (see backends.example.toml): each
+# turn spawns the claude CLI as an agentic subprocess in the room's workdir.
 [profiles.code]
 backend = "cloud-heavy"
 comms = "async"
 latency_class = "slow"
 idle_timeout_ms = 180000
+# Subprocess controls (claude-code/opencode only):
+permission_mode = "acceptEdits"   # "bypassPermissions" to also allow bash autonomously
+# max_budget_usd = 2.0            # cost guard per turn (--max-budget-usd)
+# max_turns = 30                  # agentic-turn cap (--max-turns)
 
 [profiles.reason]
 backend = "local-small"      # gemma via Ollama (local)
@@ -46,6 +52,9 @@ absolute_ceiling_ms = 1800000
 soft_worker_cap = 4
 max_concurrent_children = 3
 edit_debounce_ms = 600
+# Fallback cwd for agentic subprocess backends when no project workdir is set for
+# the room (host-specific path; ~ is expanded). 4.5.4 adds per-room/LLM selection.
+# default_workdir = "~/projects/scratch"
 
 # Per-room overrides. require_mention defaults to true globally.
 # Set require_mention = false for rooms where the bot should respond to every message.

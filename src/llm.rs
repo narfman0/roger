@@ -1,4 +1,5 @@
 use crate::history::ChatMessage;
+use crate::subprocess::SubprocessBackend;
 use crate::tools::{tool_definitions, ToolCall, ToolExecutor};
 use anyhow::Result;
 use reqwest::Client;
@@ -323,24 +324,30 @@ impl LlmClient {
 /// this enum's methods, so a chain can freely mix HTTP and subprocess backends.
 pub enum Backend {
     Http(LlmClient),
+    Subprocess(SubprocessBackend),
 }
 
 impl Backend {
     pub fn model(&self) -> &str {
         match self {
             Backend::Http(c) => c.model(),
+            Backend::Subprocess(s) => s.model(),
         }
     }
 
     pub fn history_token_budget(&self, system_prompt_tokens: usize) -> usize {
         match self {
             Backend::Http(c) => c.history_token_budget(system_prompt_tokens),
+            // The subprocess CLI manages its own context; size the transcript we
+            // hand it generously and let it compact as needed.
+            Backend::Subprocess(_) => 32_000,
         }
     }
 
     pub async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
         match self {
             Backend::Http(c) => c.chat(messages).await,
+            Backend::Subprocess(s) => s.chat(messages).await,
         }
     }
 
@@ -351,6 +358,7 @@ impl Backend {
     ) -> Result<String> {
         match self {
             Backend::Http(c) => c.chat_stream(messages, tx).await,
+            Backend::Subprocess(s) => s.chat_stream(messages, tx).await,
         }
     }
 
@@ -362,6 +370,8 @@ impl Backend {
     ) -> Result<String> {
         match self {
             Backend::Http(c) => c.chat_with_tools(messages, executor, tx).await,
+            // The subprocess runs its own tool loop; roger's executor is ignored.
+            Backend::Subprocess(s) => s.chat_stream(messages, tx).await,
         }
     }
 }
