@@ -104,6 +104,15 @@ room allowlist, the logging setup, and the speaches client.
 A single `EnvFilter` (`RUST_LOG`) gates both sinks. The non-blocking writer's
 `WorkerGuard` is held in `main` so buffered logs flush at shutdown.
 
+## Metrics
+
+`Metrics` (`src/metrics.rs`) holds lock-free process-lifetime counters: total
+responses, errors, and cumulative latency (for an average). Each completed response
+calls `metrics.record(latency_ms, ok)` and emits a structured log line
+(`responded` with `room`, `profile`, `model`, `latency_ms`, `ok`) — so the JSON log
+sink doubles as a metrics scrape source. Live totals are shown in `/status`.
+Counters reset on restart.
+
 ## Backend kinds
 
 - `open-ai` — standard OpenAI-compatible REST API (LM Studio, Ollama, LiteLLM)

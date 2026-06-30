@@ -4,6 +4,7 @@ mod error;
 mod history;
 mod llm;
 mod matrix;
+mod metrics;
 mod room_profiles;
 
 use anyhow::Result;
@@ -169,6 +170,7 @@ async fn main() -> Result<()> {
         started_at: Arc::new(Instant::now()),
         state,
         room_profiles: room_profile_store,
+        metrics: Arc::new(metrics::Metrics::default()),
     };
 
     client.add_event_handler_context(bot_ctx);

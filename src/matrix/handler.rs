@@ -3,6 +3,7 @@ use crate::{
     config::RoomConfig,
     history::{ChatMessage, HistoryStore},
     llm::LlmClient,
+    metrics::Metrics,
     room_profiles::RoomProfileStore,
 };
 use matrix_sdk::{
@@ -79,6 +80,8 @@ pub struct BotCtx {
     pub state: Arc<RwLock<ReloadableState>>,
     /// Persists `/model` runtime overrides across restarts.
     pub room_profiles: Arc<RoomProfileStore>,
+    /// Process-lifetime response counters.
+    pub metrics: Arc<Metrics>,
 }
 
 impl BotCtx {
@@ -205,15 +208,16 @@ pub async fn handle_message(
     if let Err(e) = ctx.history.append(&room_id, ChatMessage::user(&body)) {
         warn!("failed to save user message to history: {}", e);
     }
-    let (llm, system_prompt) = {
+    let (llm, system_prompt, profile, model) = {
         let st = ctx.state.read().await;
         let prompt = st
             .room_configs
             .get(&room_id)
             .and_then(|r| r.system_prompt.clone())
             .unwrap_or_else(|| st.system_prompt.clone());
-        let (client, _profile) = st.llm_for_room(&room_id);
-        (client, prompt)
+        let (client, profile) = st.llm_for_room(&room_id);
+        let model = client.model().to_string();
+        (client, prompt, profile, model)
     };
     let budget = llm.history_token_budget(crate::history::estimate_tokens(&system_prompt));
     let mut messages = vec![ChatMessage::system(&system_prompt)];
@@ -221,6 +225,7 @@ pub async fn handle_message(
 
     // Stream the LLM response, editing the ack in place as tokens arrive
     // (debounced to avoid flooding the room with edit events).
+    let req_start = Instant::now();
     let (tx, mut rx) = mpsc::channel::<String>(64);
     let stream_handle = {
         let llm = llm.clone();
@@ -257,6 +262,19 @@ pub async fn handle_message(
         }
         Err(e) => Err(anyhow::anyhow!("stream task failed: {}", e)),
     };
+
+    // Record metrics and emit a structured per-request log line.
+    let latency_ms = req_start.elapsed().as_millis() as u64;
+    let ok = result.is_ok();
+    ctx.metrics.record(latency_ms, ok);
+    info!(
+        room = %room_id,
+        profile = %profile,
+        model = %model,
+        latency_ms,
+        ok,
+        "responded"
+    );
 
     match result {
         Ok(reply) => {
@@ -312,9 +330,11 @@ async fn handle_slash_command(body: &str, room_id: &str, ctx: &BotCtx) -> Option
             let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
             let history_len = ctx.history.windowed(room_id, 100).len();
             let (client, profile) = ctx.state.read().await.llm_for_room(room_id);
+            let m_snap = ctx.metrics.snapshot();
             Some(format!(
-                "**Roger status**\nUptime: {}h {}m {}s\nProfile: {} ({})\nHistory: {} messages (this room)",
-                h, m, s, profile, client.model(), history_len
+                "**Roger status**\nUptime: {}h {}m {}s\nProfile: {} ({})\nHistory: {} messages (this room)\nRequests: {} ({} errors), avg {}ms",
+                h, m, s, profile, client.model(), history_len,
+                m_snap.requests, m_snap.errors, m_snap.avg_latency_ms
             ))
         }
         "/model" => Some(handle_model_command(parts.get(1).copied(), room_id, ctx).await),
@@ -487,6 +507,7 @@ mod tests {
             started_at: Arc::new(Instant::now()),
             state: Arc::new(RwLock::new(state())),
             room_profiles: Arc::new(RoomProfileStore::new(dir.path().join("rp.json"))),
+            metrics: Arc::new(Metrics::default()),
         }
     }
 

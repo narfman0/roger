@@ -104,7 +104,7 @@ better context handling, streaming, and observability.
 | 2 | `/model <profile>` runtime per-room switch | ✅ Done |
 | 3 | History token budgeting | ✅ Done |
 | 4 | Streaming responses (debounced ack edits) | ✅ Done |
-| 5 | Metrics: request counts, latency, error rate | ⏳ |
+| 5 | Metrics: request counts, latency, error rate | ✅ Done |
 | 6 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | 📋 deferred |
 
 ## Completed
@@ -140,3 +140,9 @@ it falls back to a non-streaming `chat()`. Reasoning-model `reasoning` deltas ar
 ignored. Verified against a live Ollama endpoint. Note: reasoning models with a
 small `max_tokens` may spend the whole budget thinking and emit no `content` —
 raise `max_tokens`/`context_tokens` for those profiles.
+
+### Metrics (#5)
+`Metrics` (`src/metrics.rs`) tracks lock-free counters: total responses, errors,
+and average latency. Each response records latency + outcome and emits a structured
+`responded` log line (room/profile/model/latency_ms/ok), so the JSON log sink works
+as a scrape source. `/status` shows live totals. Counters reset on restart.
