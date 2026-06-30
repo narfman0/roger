@@ -317,18 +317,67 @@ impl LlmClient {
     }
 }
 
-/// An LLM profile backed by an ordered chain of clients: a primary and zero or
-/// more fallbacks. Each call tries clients in order, advancing to the next only
-/// when one fails to produce a response (transport error or non-2xx). A client
+/// A single backend behind a profile. Today every backend is an OpenAI-compatible
+/// HTTP client; subprocess kinds (`claude-code`, `opencode`) become additional
+/// arms here. The fallback chain in `ProfileLlm` is kind-agnostic — it only sees
+/// this enum's methods, so a chain can freely mix HTTP and subprocess backends.
+pub enum Backend {
+    Http(LlmClient),
+}
+
+impl Backend {
+    pub fn model(&self) -> &str {
+        match self {
+            Backend::Http(c) => c.model(),
+        }
+    }
+
+    pub fn history_token_budget(&self, system_prompt_tokens: usize) -> usize {
+        match self {
+            Backend::Http(c) => c.history_token_budget(system_prompt_tokens),
+        }
+    }
+
+    pub async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
+        match self {
+            Backend::Http(c) => c.chat(messages).await,
+        }
+    }
+
+    pub async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tx: mpsc::Sender<String>,
+    ) -> Result<String> {
+        match self {
+            Backend::Http(c) => c.chat_stream(messages, tx).await,
+        }
+    }
+
+    pub async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        executor: Option<&ToolExecutor>,
+        tx: mpsc::Sender<String>,
+    ) -> Result<String> {
+        match self {
+            Backend::Http(c) => c.chat_with_tools(messages, executor, tx).await,
+        }
+    }
+}
+
+/// An LLM profile backed by an ordered chain of backends: a primary and zero or
+/// more fallbacks. Each call tries backends in order, advancing to the next only
+/// when one fails to produce a response (transport error or non-2xx). A backend
 /// that returns successfully — even with empty text — ends the chain.
 pub struct ProfileLlm {
-    clients: Vec<Arc<LlmClient>>,
+    clients: Vec<Arc<Backend>>,
 }
 
 impl ProfileLlm {
     /// `clients` must be non-empty, primary first.
-    pub fn new(clients: Vec<Arc<LlmClient>>) -> Self {
-        debug_assert!(!clients.is_empty(), "ProfileLlm requires at least one client");
+    pub fn new(clients: Vec<Arc<Backend>>) -> Self {
+        debug_assert!(!clients.is_empty(), "ProfileLlm requires at least one backend");
         ProfileLlm { clients }
     }
 
@@ -448,16 +497,16 @@ mod tests {
         assert_eq!(parse_sse_line(r#"data: {"choices":[]}"#), None);
     }
 
-    fn dead_client(model: &str) -> Arc<LlmClient> {
+    fn dead_client(model: &str) -> Arc<Backend> {
         // Port 9 (discard) refuses connections — a reliable transport failure.
-        Arc::new(LlmClient::new(
+        Arc::new(Backend::Http(LlmClient::new(
             "http://127.0.0.1:9/v1".into(),
             model.into(),
             None,
             64,
             0.0,
             4096,
-        ))
+        )))
     }
 
     #[test]
@@ -482,14 +531,14 @@ mod tests {
     #[ignore = "requires a local Ollama at 127.0.0.1:11434 with model gemma4:31b"]
     async fn falls_over_to_live_backend() {
         let primary = dead_client("dead");
-        let fallback = Arc::new(LlmClient::new(
+        let fallback = Arc::new(Backend::Http(LlmClient::new(
             "http://127.0.0.1:11434/v1".into(),
             "gemma4:31b".into(),
             None,
             1024,
             0.0,
             8192,
-        ));
+        )));
         let p = ProfileLlm::new(vec![primary, fallback]);
         let out = p.chat(&[ChatMessage::user("Reply with exactly: ok")]).await.unwrap();
         assert!(!out.trim().is_empty(), "fallback should produce a response");

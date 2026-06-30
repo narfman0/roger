@@ -302,7 +302,7 @@ impl Config {
         let mut clients = Vec::new();
         for name in &names {
             match self.build_client(name, profile) {
-                Ok(c) => clients.push(std::sync::Arc::new(c)),
+                Ok(c) => clients.push(std::sync::Arc::new(crate::llm::Backend::Http(c))),
                 Err(e) => {
                     tracing::warn!("profile '{}': skipping backend '{}': {}", profile_name, name, e)
                 }

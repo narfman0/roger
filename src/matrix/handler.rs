@@ -472,20 +472,20 @@ async fn transcribe_audio(
 mod tests {
     use super::*;
     use crate::history::HistoryStore;
-    use crate::llm::LlmClient;
+    use crate::llm::{Backend, LlmClient};
     use crate::room_profiles::RoomProfileStore;
     use std::collections::HashSet;
     use tempfile::TempDir;
 
     fn client(model: &str) -> Arc<ProfileLlm> {
-        Arc::new(ProfileLlm::new(vec![Arc::new(LlmClient::new(
+        Arc::new(ProfileLlm::new(vec![Arc::new(Backend::Http(LlmClient::new(
             "http://localhost/v1".into(),
             model.into(),
             None,
             128,
             0.0,
             8192,
-        ))]))
+        )))]))
     }
 
     fn state() -> ReloadableState {
