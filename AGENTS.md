@@ -14,7 +14,7 @@ asked. Build + test before each commit. Push when a unit of work is done.
 | `src/main.rs` | Entry point, wires all components together |
 | `src/config.rs` | Config loading: profiles.toml + backends.<HOST_ROLE>.toml + .env |
 | `src/llm.rs` | `Backend` enum (HTTP / subprocess) + `ProfileLlm` fallback chains |
-| `src/subprocess.rs` | Agentic subprocess backend (claude-code): spawn, stream-json parse, lifecycle |
+| `src/subprocess.rs` | Agentic subprocess backends (claude-code, opencode): spawn, JSON parse, lifecycle |
 | `src/workers.rs` | Background-job registry (sync/async/auto), `/jobs` + `/cancel` |
 | `src/history.rs` | Per-room conversation history, JSON-backed on disk |
 | `src/audio.rs` | Speaches/Whisper audio transcription client |

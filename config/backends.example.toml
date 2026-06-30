@@ -17,13 +17,22 @@ model = "claude-sonnet"
 api_key_env = "GATEWAY_VKEY"
 
 [backends.cloud-heavy]
-# kind: "openai" | "claude-code" | "opencode"
-# "claude-code" spawns `claude -p --bare --output-format stream-json`
-# "opencode" spawns `opencode run` (future)
+# kind: "open-ai" | "claude-code" | "open-code"
+# "claude-code" spawns `claude --print --output-format stream-json` as an agentic
+#   subprocess; base_url → ANTHROPIC_BASE_URL, api_key_env → ANTHROPIC_AUTH_TOKEN.
 kind = "claude-code"
 base_url = "http://srv:4000"
 model = "claude-opus"
 api_key_env = "GATEWAY_VKEY"
+
+# "open-code" spawns `opencode run --format json`. opencode is self-configured
+# (provider + baseURL live in ~/.config/opencode), so base_url/api_key_env are
+# ignored here; `model` is a provider/model id from `opencode models`.
+[backends.opencode-local]
+kind = "open-code"
+base_url = ""
+model = "ollama/qwen3.5:122b"
+api_key_env = ""
 
 # --- Server (HOST_ROLE=server): no GPU, everything via gateway ---
 

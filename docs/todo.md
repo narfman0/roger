@@ -176,6 +176,6 @@ sync/async comms model. Design: `docs/design-subprocess-dispatch.md`.
 | 4.5.2 | claude-code subprocess backend (spawn, stream-json, lifecycle) | ✅ Done |
 | 4.5.3 | Orchestrator: sync/async/auto + worker registry (`/jobs`, `/cancel`) | ✅ Done |
 | 4.5.4 | LLM-identified workdir (`[projects]` + `set_workdir`) | ✅ Done |
-| — | opencode subprocess backend (schema unverified) | 📋 deferred |
+| 4.5.5 | opencode subprocess backend (`run --format json`) | ✅ Done |
 | — | session-mapped continuity (`--session-id` per room) | 📋 deferred |
 | — | sync→async tool-step progress markers ("🔧 editing …") | 📋 deferred |

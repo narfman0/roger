@@ -137,8 +137,11 @@ A profile's chain is built from named backends, dispatched on `kind`
 - `open-ai` — OpenAI-compatible REST (LM Studio, Ollama, LiteLLM). `Backend::Http`.
 - `claude-code` — spawns the `claude` CLI as an agentic subprocess per turn
   (`src/subprocess.rs`, `Backend::Subprocess`). Implemented.
-- `open-code` — `opencode run` subprocess. Stubbed: returns "not yet supported"
-  (its non-interactive JSON schema isn't verified yet), so a chain fails over.
+- `open-code` — spawns `opencode run --format json` (same module). Implemented.
+  opencode is self-configured (provider + baseURL in its own config), so the
+  gateway env vars don't apply and the model is `provider/model`. Its `--format
+  json` is not token-streamed — the full reply arrives in one `text` event, so the
+  message paints once at the end.
 
 ### Subprocess backends
 

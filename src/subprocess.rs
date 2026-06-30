@@ -122,13 +122,6 @@ impl SubprocessBackend {
     /// Spawn the CLI, stream output to `tx` (accumulated snapshots, matching the
     /// HTTP `chat_stream` contract), and return the authoritative final text.
     async fn run(&self, messages: &[ChatMessage], tx: Option<mpsc::Sender<String>>) -> Result<String> {
-        if self.flavor == SubprocessKind::OpenCode {
-            // opencode's `run --format json` event schema is unverified (its
-            // non-interactive mode needs provider auth/server setup). Fail clearly
-            // rather than ship a guessed parser; the HTTP fallback can take over.
-            return Err(anyhow!("opencode backend is not yet supported"));
-        }
-
         // Per-request override (room's resolved workdir) wins over the configured
         // default baked in at build time.
         let workdir = WORKDIR
@@ -148,26 +141,56 @@ impl SubprocessBackend {
             .map_err(|_| anyhow!("child semaphore closed"))?;
 
         let (system, prompt) = render_prompt(messages);
-        let mut cmd = Command::new("claude");
-        cmd.arg("--print")
-            .arg("--output-format").arg("stream-json")
-            .arg("--verbose")
-            .arg("--include-partial-messages")
-            .arg("--permission-mode").arg(&self.permission_mode)
-            .arg("--model").arg(&self.model);
-        if let Some(sys) = &system {
-            cmd.arg("--append-system-prompt").arg(sys);
+        let program = match self.flavor {
+            SubprocessKind::ClaudeCode => "claude",
+            SubprocessKind::OpenCode => "opencode",
+        };
+        let mut cmd = Command::new(program);
+        match self.flavor {
+            SubprocessKind::ClaudeCode => {
+                cmd.arg("--print")
+                    .arg("--output-format").arg("stream-json")
+                    .arg("--verbose")
+                    .arg("--include-partial-messages")
+                    .arg("--permission-mode").arg(&self.permission_mode)
+                    .arg("--model").arg(&self.model);
+                if let Some(sys) = &system {
+                    cmd.arg("--append-system-prompt").arg(sys);
+                }
+                for d in &self.extra_dirs {
+                    cmd.arg("--add-dir").arg(d);
+                }
+                if let Some(b) = self.limits.max_budget_usd {
+                    cmd.arg("--max-budget-usd").arg(format!("{}", b));
+                }
+                if let Some(t) = self.limits.max_turns {
+                    cmd.arg("--max-turns").arg(format!("{}", t));
+                }
+                cmd.arg(&prompt);
+                // Empty base_url => let the CLI use its own auth (logged-in session).
+                if !self.base_url.is_empty() {
+                    cmd.env("ANTHROPIC_BASE_URL", &self.base_url);
+                }
+                if let Some(token) = &self.auth_token {
+                    cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+                }
+            }
+            SubprocessKind::OpenCode => {
+                // opencode is self-configured (provider + baseURL live in its own
+                // config), so the gateway env vars don't apply. It has no system-
+                // prompt flag, so the system prompt is folded into the message.
+                // `--format json` emits one text event with the full reply.
+                cmd.arg("run").arg("--format").arg("json").arg("--model").arg(&self.model);
+                if self.permission_mode == "bypassPermissions" {
+                    cmd.arg("--dangerously-skip-permissions");
+                }
+                let msg = match &system {
+                    Some(sys) => format!("{}\n\n{}", sys, prompt),
+                    None => prompt.clone(),
+                };
+                cmd.arg(msg);
+            }
         }
-        for d in &self.extra_dirs {
-            cmd.arg("--add-dir").arg(d);
-        }
-        if let Some(b) = self.limits.max_budget_usd {
-            cmd.arg("--max-budget-usd").arg(format!("{}", b));
-        }
-        if let Some(t) = self.limits.max_turns {
-            cmd.arg("--max-turns").arg(format!("{}", t));
-        }
-        cmd.arg(&prompt);
 
         cmd.current_dir(&workdir)
             .stdin(Stdio::null())
@@ -175,16 +198,9 @@ impl SubprocessBackend {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .process_group(0); // own group so we can kill the whole tree
-        // Empty base_url => let the CLI use its own auth (logged-in session).
-        if !self.base_url.is_empty() {
-            cmd.env("ANTHROPIC_BASE_URL", &self.base_url);
-        }
-        if let Some(token) = &self.auth_token {
-            cmd.env("ANTHROPIC_AUTH_TOKEN", token);
-        }
 
-        info!(model = %self.model, workdir = %workdir.display(), "spawning claude subprocess");
-        let mut child = cmd.spawn().map_err(|e| anyhow!("failed to spawn claude: {}", e))?;
+        info!(program, model = %self.model, workdir = %workdir.display(), "spawning subprocess");
+        let mut child = cmd.spawn().map_err(|e| anyhow!("failed to spawn {}: {}", program, e))?;
         let pid = child.id().map(|p| p as i32);
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
         let mut lines = BufReader::new(stdout).lines();
@@ -205,19 +221,23 @@ impl SubprocessBackend {
                 Err(_) => {
                     kill_tree(pid, &mut child).await;
                     return Err(if Instant::now() >= deadline {
-                        anyhow!("claude run exceeded absolute ceiling")
+                        anyhow!("{} run exceeded absolute ceiling", program)
                     } else {
-                        anyhow!("claude produced no output for {:?} (idle timeout)", self.limits.idle)
+                        anyhow!("{} produced no output for {:?} (idle timeout)", program, self.limits.idle)
                     });
                 }
                 Ok(Ok(None)) => break, // EOF
                 Ok(Err(e)) => {
                     kill_tree(pid, &mut child).await;
-                    return Err(anyhow!("error reading claude output: {}", e));
+                    return Err(anyhow!("error reading {} output: {}", program, e));
                 }
                 Ok(Ok(Some(line))) => {
-                    match parse_claude_line(&line) {
-                        ClaudeEvent::TextDelta(t) => {
+                    let ev = match self.flavor {
+                        SubprocessKind::ClaudeCode => parse_claude_line(&line),
+                        SubprocessKind::OpenCode => parse_opencode_line(&line),
+                    };
+                    match ev {
+                        StreamEvent::Text(t) => {
                             full.push_str(&t);
                             if let Some(tx) = &tx {
                                 if tx.send(full.clone()).await.is_err() {
@@ -227,14 +247,14 @@ impl SubprocessBackend {
                                 }
                             }
                         }
-                        ClaudeEvent::Result { text, is_error } => {
+                        StreamEvent::Final { text, is_error } => {
                             if is_error {
-                                run_error = Some(text);
+                                run_error = Some(text.unwrap_or_else(|| full.clone()));
                             } else {
-                                final_text = Some(text);
+                                final_text = Some(text.unwrap_or_else(|| full.clone()));
                             }
                         }
-                        ClaudeEvent::Other => {}
+                        StreamEvent::Other => {}
                     }
                 }
             }
@@ -242,7 +262,7 @@ impl SubprocessBackend {
 
         let status = child.wait().await.ok();
         if let Some(err) = run_error {
-            return Err(anyhow!("claude reported error: {}", err));
+            return Err(anyhow!("{} reported error: {}", program, err));
         }
         if let Some(text) = final_text {
             return Ok(text);
@@ -253,7 +273,8 @@ impl SubprocessBackend {
         }
         let stderr = read_stderr(&mut child).await;
         Err(anyhow!(
-            "claude produced no result (exit {:?}){}",
+            "{} produced no result (exit {:?}){}",
+            program,
             status.and_then(|s| s.code()),
             if stderr.is_empty() { String::new() } else { format!(": {}", stderr) }
         ))
@@ -294,9 +315,13 @@ fn render_prompt(messages: &[ChatMessage]) -> (Option<String>, String) {
     (if sys.is_empty() { None } else { Some(sys) }, prompt)
 }
 
-enum ClaudeEvent {
-    TextDelta(String),
-    Result { text: String, is_error: bool },
+/// A normalized event from either CLI's JSON output stream.
+enum StreamEvent {
+    /// Incremental assistant text to append (claude: a delta; opencode: a full part).
+    Text(String),
+    /// Terminal outcome. `text` = authoritative final (claude `result`); `None`
+    /// means "use the accumulated text" (opencode, whose text lives in `Text`s).
+    Final { text: Option<String>, is_error: bool },
     Other,
 }
 
@@ -305,14 +330,14 @@ enum ClaudeEvent {
 /// `event.type=="content_block_delta"` → `event.delta.type=="text_delta"` →
 /// `event.delta.text`; the terminal `result` event carries the authoritative
 /// `result` string plus `is_error`/`subtype`.
-fn parse_claude_line(line: &str) -> ClaudeEvent {
+fn parse_claude_line(line: &str) -> StreamEvent {
     let line = line.trim();
     if line.is_empty() {
-        return ClaudeEvent::Other;
+        return StreamEvent::Other;
     }
     let v: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(_) => return ClaudeEvent::Other,
+        Err(_) => return StreamEvent::Other,
     };
     match v.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
@@ -321,11 +346,11 @@ fn parse_claude_line(line: &str) -> ClaudeEvent {
                 let delta = &ev["delta"];
                 if delta.get("type").and_then(Value::as_str) == Some("text_delta") {
                     if let Some(t) = delta.get("text").and_then(Value::as_str) {
-                        return ClaudeEvent::TextDelta(t.to_string());
+                        return StreamEvent::Text(t.to_string());
                     }
                 }
             }
-            ClaudeEvent::Other
+            StreamEvent::Other
         }
         Some("result") => {
             let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false)
@@ -335,13 +360,46 @@ fn parse_claude_line(line: &str) -> ClaudeEvent {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            ClaudeEvent::Result { text, is_error }
+            StreamEvent::Final { text: Some(text), is_error }
         }
-        _ => ClaudeEvent::Other,
+        _ => StreamEvent::Other,
     }
 }
 
-/// Kill the child and its whole process group (claude spawns its own children).
+/// Parse one line of opencode `run --format json` output. Schema verified against
+/// the installed CLI: `{"type":"text","part":{"type":"text","text":"…"}}` carries
+/// the (full) assistant text part; `{"type":"error",…}` signals failure. Other
+/// events (`step_start`, `step_finish`, tool parts) are ignored; success is the
+/// accumulated text at EOF. Note: `--format json` is not token-streamed — the full
+/// reply arrives in one text event.
+fn parse_opencode_line(line: &str) -> StreamEvent {
+    let line = line.trim();
+    if line.is_empty() {
+        return StreamEvent::Other;
+    }
+    let v: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return StreamEvent::Other,
+    };
+    match v.get("type").and_then(Value::as_str) {
+        Some("text") => {
+            let t = v["part"].get("text").and_then(Value::as_str).unwrap_or("");
+            StreamEvent::Text(t.to_string())
+        }
+        Some("error") => {
+            // Surface whatever message-ish field is present.
+            let msg = v
+                .get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| v.to_string());
+            StreamEvent::Final { text: Some(msg), is_error: true }
+        }
+        _ => StreamEvent::Other,
+    }
+}
+
+/// Kill the child and its whole process group (these CLIs spawn their own children).
 async fn kill_tree(pid: Option<i32>, child: &mut tokio::process::Child) {
     if let Some(pid) = pid {
         // We launched with process_group(0), so the child leads group `pid`.
@@ -371,8 +429,8 @@ mod tests {
     fn parse_text_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#;
         match parse_claude_line(line) {
-            ClaudeEvent::TextDelta(t) => assert_eq!(t, "hi"),
-            _ => panic!("expected text delta"),
+            StreamEvent::Text(t) => assert_eq!(t, "hi"),
+            _ => panic!("expected text"),
         }
     }
 
@@ -380,11 +438,11 @@ mod tests {
     fn parse_result_success() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"final answer"}"#;
         match parse_claude_line(line) {
-            ClaudeEvent::Result { text, is_error } => {
-                assert_eq!(text, "final answer");
+            StreamEvent::Final { text, is_error } => {
+                assert_eq!(text.as_deref(), Some("final answer"));
                 assert!(!is_error);
             }
-            _ => panic!("expected result"),
+            _ => panic!("expected final"),
         }
     }
 
@@ -392,8 +450,8 @@ mod tests {
     fn parse_result_error() {
         let line = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"hit limit"}"#;
         match parse_claude_line(line) {
-            ClaudeEvent::Result { is_error, .. } => assert!(is_error),
-            _ => panic!("expected result"),
+            StreamEvent::Final { is_error, .. } => assert!(is_error),
+            _ => panic!("expected final"),
         }
     }
 
@@ -406,7 +464,37 @@ mod tests {
             "not json",
             "",
         ] {
-            assert!(matches!(parse_claude_line(line), ClaudeEvent::Other));
+            assert!(matches!(parse_claude_line(line), StreamEvent::Other));
+        }
+    }
+
+    #[test]
+    fn parse_opencode_text() {
+        // Verified shape from `opencode run --format json`.
+        let line = r#"{"type":"text","timestamp":1,"sessionID":"s","part":{"id":"p","messageID":"m","sessionID":"s","type":"text","text":"ok"}}"#;
+        match parse_opencode_line(line) {
+            StreamEvent::Text(t) => assert_eq!(t, "ok"),
+            _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn parse_opencode_ignores_steps() {
+        for line in [
+            r#"{"type":"step_start","part":{"type":"step-start"}}"#,
+            r#"{"type":"step_finish","part":{"type":"step-finish","reason":"stop"}}"#,
+            "not json",
+        ] {
+            assert!(matches!(parse_opencode_line(line), StreamEvent::Other));
+        }
+    }
+
+    #[test]
+    fn parse_opencode_error() {
+        let line = r#"{"type":"error","error":{"message":"boom"}}"#;
+        match parse_opencode_line(line) {
+            StreamEvent::Final { is_error, .. } => assert!(is_error),
+            _ => panic!("expected final error"),
         }
     }
 
@@ -447,6 +535,32 @@ mod tests {
             ChatMessage::user("Reply with exactly the single word: ok"),
         ];
         let out = b.chat(&msgs).await.expect("claude run should succeed");
+        assert!(!out.trim().is_empty(), "expected non-empty result, got {:?}", out);
+    }
+
+    // Real spawn through the opencode backend (free hosted model). Run with:
+    //   cargo test --release opencode_subprocess_smoke -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "spawns a real opencode subprocess (free hosted model)"]
+    async fn opencode_subprocess_smoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = SubprocessBackend::new(
+            SubprocessKind::OpenCode,
+            "opencode/deepseek-v4-flash-free".into(),
+            String::new(),
+            None,
+            Some(dir.path().to_path_buf()),
+            Vec::new(),
+            "acceptEdits".into(),
+            ProcLimits {
+                idle: Duration::from_secs(120),
+                ceiling: Duration::from_secs(180),
+                max_budget_usd: None,
+                max_turns: None,
+            },
+        );
+        let msgs = vec![ChatMessage::user("Reply with exactly the single word: ok")];
+        let out = b.chat(&msgs).await.expect("opencode run should succeed");
         assert!(!out.trim().is_empty(), "expected non-empty result, got {:?}", out);
     }
 
