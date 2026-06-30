@@ -5,6 +5,9 @@ After=network.target lmstudio-server.service
 [Service]
 WorkingDirectory=%h/.openclaw/workspace/roger
 ExecStart=%h/.openclaw/workspace/roger/target/release/roger
+# `systemctl --user reload roger` hot-reloads config (profiles, system prompt,
+# per-room settings) without dropping the Matrix session.
+ExecReload=/bin/kill -HUP $MAINPID
 EnvironmentFile=%h/.openclaw/workspace/roger/.env
 Restart=always
 RestartSec=5

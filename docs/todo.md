@@ -39,10 +39,60 @@ Commands are intercepted before the LLM — handled inline and edited into the a
 ### Systemd units (#5)
 `deploy/lmstudio-server.service` and `deploy/roger.service` created with install instructions in `deploy/README.md`. Run `systemctl --user enable/start` after copying to `~/.config/systemd/user/`.
 
-## Phase 2 (next)
+---
 
-See the full roadmap in conversation history. Key next items:
-- Config hot-reload (`SIGHUP`)
-- `/status` model name display
-- Per-room system prompt override
-- Structured logging with rotation
+# Phase 2
+
+## Goals
+
+Operability: change behavior without restarts, observe what roger is doing, tailor it per room.
+
+## Tasks
+
+| # | Task | Status |
+|---|------|--------|
+| 1 | Config hot-reload (`SIGHUP`) | ✅ Done |
+| 2 | `/status` model name display | ✅ Done |
+| 3 | Per-room system prompt override | ✅ Done |
+| 4 | Structured logging with rotation | ✅ Done |
+
+## Completed
+
+### Config hot-reload (#1)
+Roger installs a `SIGHUP` handler (`reload_on_sighup` in `main.rs`). On signal it
+re-reads `config/` and atomically swaps the reloadable state behind an
+`Arc<RwLock<ReloadableState>>`: the LLM client (model/temperature/max_tokens),
+the global system prompt, and all per-room settings. The Matrix session, room
+allowlist, and credentials are fixed for the process lifetime — those still need a
+restart. A failed reload (bad TOML, missing backend) logs a warning and keeps the
+current config rather than crashing. Trigger with `kill -HUP <pid>` or
+`systemctl --user reload roger` (`ExecReload` added to the unit).
+
+The read lock is never held across the LLM call — handlers snapshot the client +
+prompt and drop the guard first, so a reload never blocks in-flight responses.
+
+### `/status` model name (#2)
+`/status` now reports the active chat model alongside uptime and per-room history
+count. Reads the live `model_name` from reloadable state, so it reflects a hot-reload.
+
+### Per-room system prompt (#3)
+`RoomConfig` gained an optional `system_prompt` field. When set, it replaces the
+global prompt for that room; `{date}` is injected the same way. Falls back to the
+global prompt when unset. See the coding-room example in `config/profiles.toml`.
+
+### Structured logging with rotation (#4)
+`init_logging` layers two sinks: human-readable to stderr (journald-friendly) and
+JSON with daily rotation to `ROGER_LOG_DIR` (default `roger_session/logs/`, file
+`roger.log.YYYY-MM-DD`) via `tracing-appender`. The non-blocking writer guard is
+held for the process lifetime so logs flush on shutdown. `RUST_LOG` controls both
+sinks.
+
+## Phase 3 (next)
+
+Roadmap candidates — not yet started:
+- Profile routing: pick LLM profile per task (`code`/`reason`/`research`) instead of always `chat`
+- Streaming responses: edit the ack incrementally as tokens arrive (debounced)
+- `/model <profile>` command to switch a room's backend at runtime
+- Token/context budgeting: summarize or trim history beyond a token threshold
+- Multi-backend dispatch: implement the reserved `claude-code` / `open-code` subprocess kinds
+- Metrics: request counts, latency, error rate (Prometheus endpoint or structured log scrape)

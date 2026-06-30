@@ -131,14 +131,23 @@ pub struct RoomConfig {
     /// Set to false for rooms where the bot should respond to every message.
     #[serde(default = "default_require_mention")]
     pub require_mention: bool,
+    /// Optional per-room system prompt override. When set, replaces the global
+    /// system prompt for this room. Supports the `{date}` placeholder.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 fn default_require_mention() -> bool { true }
 
 impl Default for RoomConfig {
     fn default() -> Self {
-        RoomConfig { name: String::new(), require_mention: true }
+        RoomConfig { name: String::new(), require_mention: true, system_prompt: None }
     }
+}
+
+/// Replace the `{date}` placeholder with today's date (YYYY-MM-DD).
+fn inject_date(s: &str) -> String {
+    s.replace("{date}", &Local::now().format("%Y-%m-%d").to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,7 +221,13 @@ impl Config {
         let raw_prompt = fs::read_to_string(&prompt_path).unwrap_or_else(|_| {
             "You are Roger, a helpful Matrix-native AI assistant.".to_string()
         });
-        let system_prompt = raw_prompt.replace("{date}", &Local::now().format("%Y-%m-%d").to_string());
+        let system_prompt = inject_date(&raw_prompt);
+
+        // Inject {date} into any per-room system prompt overrides.
+        let mut rooms = profiles_file.rooms;
+        for room in rooms.values_mut() {
+            room.system_prompt = room.system_prompt.as_deref().map(inject_date);
+        }
 
         Ok(Config {
             profiles: profiles_file.profiles,
@@ -221,7 +236,7 @@ impl Config {
                 task_profiles: HashMap::new(),
             }),
             comms: profiles_file.comms.unwrap_or_default(),
-            rooms: profiles_file.rooms,
+            rooms,
             matrix_homeserver,
             matrix_user,
             matrix_password,
@@ -236,5 +251,66 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("unknown profile: {}", profile))?;
         self.backends.get(&p.backend)
             .ok_or_else(|| anyhow::anyhow!("unknown backend '{}' for profile '{}'", p.backend, profile))
+    }
+
+    /// Build the LLM client for the "chat" profile. Returns the client and the
+    /// resolved model name. Shared by startup and config hot-reload.
+    pub fn build_chat_llm(&self) -> anyhow::Result<(crate::llm::LlmClient, String)> {
+        let backend = self.backend_for_profile("chat")?;
+        let profile = self.profiles.get("chat")
+            .ok_or_else(|| anyhow::anyhow!("chat profile required"))?;
+        let base_url = format!(
+            "{}/v1",
+            backend.base_url.trim_end_matches('/').trim_end_matches("/v1")
+        );
+        let llm = crate::llm::LlmClient::new(
+            base_url,
+            backend.model.clone(),
+            backend.api_key(),
+            profile.max_tokens.unwrap_or(1024),
+            profile.temperature.unwrap_or(0.7),
+        );
+        Ok((llm, backend.model.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The committed profiles.toml must parse, including per-room overrides.
+    #[test]
+    fn committed_profiles_toml_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config/profiles.toml");
+        let s = fs::read_to_string(path).expect("read profiles.toml");
+        let parsed: ProfilesFile = toml::from_str(&s).expect("parse profiles.toml");
+        assert!(parsed.profiles.contains_key("chat"), "chat profile required");
+        // At least one room defines a system_prompt override.
+        assert!(
+            parsed.rooms.values().any(|r| r.system_prompt.is_some()),
+            "expected a per-room system_prompt example"
+        );
+    }
+
+    #[test]
+    fn room_without_override_defaults_to_none() {
+        let toml = r#"
+            [profiles.chat]
+            backend = "x"
+            [rooms."!a:b"]
+            name = "Plain"
+            require_mention = true
+        "#;
+        let parsed: ProfilesFile = toml::from_str(toml).unwrap();
+        let room = parsed.rooms.get("!a:b").unwrap();
+        assert!(room.system_prompt.is_none());
+        assert!(room.require_mention);
+    }
+
+    #[test]
+    fn inject_date_replaces_placeholder() {
+        let out = inject_date("today is {date}.");
+        assert!(!out.contains("{date}"));
+        assert!(out.starts_with("today is "));
     }
 }

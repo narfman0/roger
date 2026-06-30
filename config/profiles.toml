@@ -43,6 +43,8 @@ edit_debounce_ms = 600
 
 # Per-room overrides. require_mention defaults to true globally.
 # Set require_mention = false for rooms where the bot should respond to every message.
+# Optional `system_prompt` overrides the global prompt for that room (supports {date}).
+# Edit any of these and run `systemctl --user reload roger` (SIGHUP) to apply live.
 [rooms."!PQIkeFGBzVPEyjiZIT:matrix.blastedstudios.com"]
 name = "Roger Test - General"
 require_mention = false
@@ -50,3 +52,8 @@ require_mention = false
 [rooms."!nogMOAyCJDGivqjSdK:matrix.blastedstudios.com"]
 name = "Roger Test - Coding"
 require_mention = true
+system_prompt = """
+You are Roger in a coding room. Be terse and technical. Prefer code over prose.
+When asked for code, output a single fenced block with no preamble unless asked.
+Today's date is {date}.
+"""

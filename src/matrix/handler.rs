@@ -18,29 +18,31 @@ use matrix_sdk::{
     Client,
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
+
+/// Config that can be swapped at runtime on SIGHUP without restarting the bot.
+/// Everything reachable behind `BotCtx::state` is reloadable; fields directly on
+/// `BotCtx` are fixed for the process lifetime.
+pub struct ReloadableState {
+    pub llm: Arc<LlmClient>,
+    pub model_name: String,
+    pub system_prompt: String,
+    pub room_configs: HashMap<String, RoomConfig>,
+}
 
 #[derive(Clone)]
 pub struct BotCtx {
     pub allowed_rooms: std::collections::HashSet<String>,
-    pub room_configs: HashMap<String, RoomConfig>,
     pub bot_user_id: String,
     pub bot_localpart: String,
-    pub llm: Arc<LlmClient>,
     pub speaches: Option<Arc<SpeachesClient>>,
     pub history: Arc<HistoryStore>,
-    pub system_prompt: String,
     pub started_at: Arc<Instant>,
+    pub state: Arc<RwLock<ReloadableState>>,
 }
 
 impl BotCtx {
-    pub fn require_mention(&self, room_id: &str) -> bool {
-        self.room_configs
-            .get(room_id)
-            .map(|r| r.require_mention)
-            .unwrap_or(true)
-    }
-
     fn is_mentioned(&self, body: &str) -> bool {
         let needle_full = format!("@{}", self.bot_user_id);
         let needle_local = format!("@{}", self.bot_localpart);
@@ -113,15 +115,23 @@ pub async fn handle_message(
         _ => return,
     };
 
-    // Mention gate
-    if ctx.require_mention(&room_id) && !ctx.is_mentioned(&body) {
+    // Mention gate — read the (reloadable) per-room config
+    let require_mention = ctx
+        .state
+        .read()
+        .await
+        .room_configs
+        .get(&room_id)
+        .map(|r| r.require_mention)
+        .unwrap_or(true);
+    if require_mention && !ctx.is_mentioned(&body) {
         return;
     }
 
     info!(room = %room_id, sender = %event.sender, "processing: {}", body);
 
     // Handle slash commands without touching the LLM
-    if let Some(cmd_reply) = handle_slash_command(&body, &room_id, &ctx) {
+    if let Some(cmd_reply) = handle_slash_command(&body, &room_id, &ctx).await {
         let _ = room.typing_notice(true).await;
         let ack_id = match room.send(RoomMessageEventContent::text_plain("…")).await {
             Ok(resp) => resp.event_id,
@@ -150,15 +160,26 @@ pub async fn handle_message(
         }
     };
 
-    // Build context: system prompt + history + current message
+    // Build context: system prompt + history + current message.
+    // Snapshot the reloadable bits (LLM client + resolved system prompt) and drop
+    // the read lock before the long-running LLM call so SIGHUP reloads aren't blocked.
     if let Err(e) = ctx.history.append(&room_id, ChatMessage::user(&body)) {
         warn!("failed to save user message to history: {}", e);
     }
-    let mut messages = vec![ChatMessage::system(&ctx.system_prompt)];
+    let (llm, system_prompt) = {
+        let st = ctx.state.read().await;
+        let prompt = st
+            .room_configs
+            .get(&room_id)
+            .and_then(|r| r.system_prompt.clone())
+            .unwrap_or_else(|| st.system_prompt.clone());
+        (st.llm.clone(), prompt)
+    };
+    let mut messages = vec![ChatMessage::system(&system_prompt)];
     messages.extend(ctx.history.windowed(&room_id, 20));
 
     // Call LLM with full room history
-    let result = ctx.llm.chat(&messages).await;
+    let result = llm.chat(&messages).await;
 
     let _ = room.typing_notice(false).await;
 
@@ -186,7 +207,7 @@ pub async fn handle_message(
 }
 
 /// Returns Some(reply) if the message is a slash command, None otherwise.
-fn handle_slash_command(body: &str, room_id: &str, ctx: &BotCtx) -> Option<String> {
+async fn handle_slash_command(body: &str, room_id: &str, ctx: &BotCtx) -> Option<String> {
     let trimmed = body.trim();
     if !trimmed.starts_with('/') {
         return None;
@@ -214,9 +235,10 @@ fn handle_slash_command(body: &str, room_id: &str, ctx: &BotCtx) -> Option<Strin
             let secs = uptime.as_secs();
             let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
             let history_len = ctx.history.windowed(room_id, 100).len();
+            let model_name = ctx.state.read().await.model_name.clone();
             Some(format!(
-                "**Roger status**\nUptime: {}h {}m {}s\nHistory: {} messages (this room)",
-                h, m, s, history_len
+                "**Roger status**\nUptime: {}h {}m {}s\nModel: {}\nHistory: {} messages (this room)",
+                h, m, s, model_name, history_len
             ))
         }
         _ => Some(format!("Unknown command `{}`. Try `/help`.", parts[0])),

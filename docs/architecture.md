@@ -46,6 +46,30 @@ All cloud LLM calls go through a LiteLLM Docker container on `srv:4000`. This:
 - The `ai` machine uses a LiteLLM virtual key (`GATEWAY_VKEY`) with no direct Anthropic access
 - Lets backends be swapped without changing roger's config
 
+## Config hot-reload
+
+Reloadable config lives behind `Arc<RwLock<ReloadableState>>` (in `matrix/handler.rs`),
+shared by every event handler via the cloned `BotCtx`. `ReloadableState` holds the
+LLM client, model name, global system prompt, and per-room configs.
+
+A `SIGHUP` listener task (`reload_on_sighup` in `main.rs`) re-reads `config/` and
+swaps the state in place. Reload is fail-safe: a bad config logs a warning and the
+running config is kept. Handlers clone what they need out of the lock and release it
+before any LLM/network call, so reloads never block in-flight requests.
+
+Fixed for the process lifetime (restart required): Matrix credentials, homeserver,
+room allowlist, the logging setup, and the speaches client.
+
+## Logging
+
+`init_logging` builds a layered `tracing` subscriber:
+- **stderr** — human-readable, captured by journald under systemd.
+- **file** — JSON lines, daily-rotated via `tracing-appender` into `ROGER_LOG_DIR`
+  (default `roger_session/logs/`).
+
+A single `EnvFilter` (`RUST_LOG`) gates both sinks. The non-blocking writer's
+`WorkerGuard` is held in `main` so buffered logs flush at shutdown.
+
 ## Backend kinds
 
 - `open-ai` — standard OpenAI-compatible REST API (LM Studio, Ollama, LiteLLM)

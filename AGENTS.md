@@ -31,7 +31,19 @@ Copy `.env.example` (or see README) and `config/backends.example.toml` to `confi
 RUST_LOG=roger=info ./target/debug/roger
 ```
 
-State is stored in `roger_session/`: SQLite crypto store, `session.json` (Matrix tokens), `history/` (per-room JSON).
+State is stored in `roger_session/`: SQLite crypto store, `session.json` (Matrix tokens), `history/` (per-room JSON), `logs/` (daily-rotated JSON logs).
+
+## Hot-reload
+
+`SIGHUP` reloads `config/` live (LLM client, system prompt, per-room settings) via
+`Arc<RwLock<ReloadableState>>` — no Matrix re-login. `kill -HUP <pid>` or
+`systemctl --user reload roger`. Credentials, homeserver, and room allowlist need a
+restart. See `docs/architecture.md` → Config hot-reload.
+
+## Logging
+
+`init_logging` (`src/main.rs`): human-readable to stderr + JSON daily-rotated to
+`ROGER_LOG_DIR` (default `roger_session/logs/`). `RUST_LOG` gates both.
 
 ## Config
 
