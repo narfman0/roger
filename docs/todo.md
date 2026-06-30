@@ -106,7 +106,7 @@ better context handling, streaming, and observability.
 | 4 | Streaming responses (debounced ack edits) | ✅ Done |
 | 5 | Metrics: request counts, latency, error rate | ✅ Done |
 | 6 | Per-profile primary + fallback backends | ✅ Done |
-| 7 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | 📋 deferred |
+| 7 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | ✅ Done (Phase 4.5) |
 
 ## Completed
 
@@ -156,3 +156,26 @@ on connect, before any token is shown. The `chat` profile now falls back to
 Anthropic (`cloud-fast`) so it survives LM Studio being down. `/status` shows the
 fallback count; startup logs the model chain. Live failover verified against Ollama
 (`falls_over_to_live_backend`, an `#[ignore]` test).
+
+---
+
+# Phase 4
+
+## Goals
+
+Turn roger into an orchestrator: native tools, agentic subprocess backends, and a
+sync/async comms model. Design: `docs/design-subprocess-dispatch.md`.
+
+## Tasks
+
+| # | Task | Status |
+|---|------|--------|
+| 4 | Native tool calling (web_search, web_fetch) | ✅ Done |
+| 4.5.0 | Mutable state → `~/.roger` (separate from workdir) | ✅ Done |
+| 4.5.1 | `Backend` enum behind `ProfileLlm` (kind-agnostic chain) | ✅ Done |
+| 4.5.2 | claude-code subprocess backend (spawn, stream-json, lifecycle) | ✅ Done |
+| 4.5.3 | Orchestrator: sync/async/auto + worker registry (`/jobs`, `/cancel`) | ✅ Done |
+| 4.5.4 | LLM-identified workdir (`[projects]` + `set_workdir`) | ✅ Done |
+| — | opencode subprocess backend (schema unverified) | 📋 deferred |
+| — | session-mapped continuity (`--session-id` per room) | 📋 deferred |
+| — | sync→async tool-step progress markers ("🔧 editing …") | 📋 deferred |

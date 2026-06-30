@@ -6,6 +6,7 @@ mod llm;
 mod matrix;
 mod metrics;
 mod room_profiles;
+mod room_workdirs;
 mod subprocess;
 mod tools;
 mod workers;
@@ -141,8 +142,28 @@ async fn main() -> Result<()> {
         Arc::new(audio::SpeachesClient::new(url.clone()))
     });
 
-    // Build tool executor (web_search, web_fetch)
-    let tool_executor = Arc::new(tools::ToolExecutor::new(cfg.searxng_url.clone()));
+    // Per-room agentic workdir store (set via the set_workdir tool), persisted in
+    // the state dir. Shared between the tool executor (writes) and handler (reads).
+    let room_workdirs = Arc::new(room_workdirs::RoomWorkdirStore::load(
+        state_dir.join("room_workdirs.json"),
+    ));
+
+    // Known projects (name → expanded path) selectable via set_workdir.
+    let projects: HashMap<String, String> = cfg
+        .projects
+        .iter()
+        .map(|(k, v)| (k.clone(), config::expand_tilde(v).to_string_lossy().into_owned()))
+        .collect();
+    if !projects.is_empty() {
+        info!("projects: {}", projects.keys().cloned().collect::<Vec<_>>().join(", "));
+    }
+
+    // Build tool executor (web_search, web_fetch, set_workdir)
+    let tool_executor = Arc::new(tools::ToolExecutor::with_projects(
+        cfg.searxng_url.clone(),
+        projects,
+        Some(room_workdirs.clone()),
+    ));
     if let Some(url) = &cfg.searxng_url {
         info!("searxng: {} (web_search enabled)", url);
     } else {
@@ -218,6 +239,7 @@ async fn main() -> Result<()> {
         metrics: Arc::new(metrics::Metrics::default()),
         tool_executor,
         workers,
+        room_workdirs,
     };
 
     client.add_event_handler_context(bot_ctx);

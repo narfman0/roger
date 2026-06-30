@@ -36,6 +36,13 @@ fn child_sem() -> &'static Semaphore {
     CHILD_SEM.get_or_init(|| Semaphore::new(3))
 }
 
+tokio::task_local! {
+    /// Per-request working directory override for subprocess backends, set by the
+    /// orchestrator around the producer task (the room's resolved workdir). Avoids
+    /// threading a workdir param through the whole chat-call chain.
+    pub static WORKDIR: Option<PathBuf>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubprocessKind {
     ClaudeCode,
@@ -122,10 +129,14 @@ impl SubprocessBackend {
             return Err(anyhow!("opencode backend is not yet supported"));
         }
 
-        let workdir = self
-            .workdir
-            .clone()
-            .ok_or_else(|| anyhow!("subprocess backend has no workdir (set comms.default_workdir)"))?;
+        // Per-request override (room's resolved workdir) wins over the configured
+        // default baked in at build time.
+        let workdir = WORKDIR
+            .try_with(|w| w.clone())
+            .ok()
+            .flatten()
+            .or_else(|| self.workdir.clone())
+            .ok_or_else(|| anyhow!("subprocess backend has no workdir (set comms.default_workdir or use set_workdir)"))?;
         if !workdir.is_dir() {
             return Err(anyhow!("workdir does not exist: {}", workdir.display()));
         }

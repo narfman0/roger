@@ -204,6 +204,9 @@ struct ProfilesFile {
     comms: Option<CommsConfig>,
     #[serde(default)]
     rooms: HashMap<String, RoomConfig>,
+    /// Known projects (name → path) the LLM can select via the `set_workdir` tool.
+    #[serde(default)]
+    projects: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +221,8 @@ pub struct Config {
     pub routing: RoutingConfig,
     pub comms: CommsConfig,
     pub rooms: HashMap<String, RoomConfig>,
+    /// Known projects (name → path) selectable via the `set_workdir` tool.
+    pub projects: HashMap<String, String>,
     pub matrix_homeserver: String,
     pub matrix_user: String,
     pub matrix_password: String,
@@ -285,6 +290,7 @@ impl Config {
             }),
             comms: profiles_file.comms.unwrap_or_default(),
             rooms,
+            projects: profiles_file.projects,
             matrix_homeserver,
             matrix_user,
             matrix_password,

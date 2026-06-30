@@ -5,7 +5,9 @@ use crate::{
     llm::ProfileLlm,
     metrics::Metrics,
     room_profiles::RoomProfileStore,
-    tools::ToolExecutor,
+    room_workdirs::RoomWorkdirStore,
+    subprocess::WORKDIR,
+    tools::{ToolExecutor, ROOM_ID},
     workers::{JobHandle, Workers},
 };
 use matrix_sdk::{
@@ -26,6 +28,7 @@ use matrix_sdk::{
 };
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -149,10 +152,12 @@ pub struct BotCtx {
     pub room_profiles: Arc<RoomProfileStore>,
     /// Process-lifetime response counters.
     pub metrics: Arc<Metrics>,
-    /// Tool executor for web_search / web_fetch.
+    /// Tool executor for web_search / web_fetch / set_workdir.
     pub tool_executor: Arc<ToolExecutor>,
     /// Background-job registry (sync/async/auto response tasks).
     pub workers: Arc<Workers>,
+    /// Per-room agentic workdir selections (set via set_workdir), persisted.
+    pub room_workdirs: Arc<RoomWorkdirStore>,
 }
 
 impl BotCtx {
@@ -285,6 +290,14 @@ pub async fn handle_message(
     let mut messages = vec![ChatMessage::system(&system_prompt)];
     messages.extend(ctx.history.windowed_by_tokens(&room_id, budget));
 
+    // Resolve the agentic workdir for this room: the set_workdir selection, else
+    // the configured default. Passed to the subprocess via a task-local.
+    let workdir: Option<PathBuf> = ctx
+        .room_workdirs
+        .get(&room_id)
+        .map(PathBuf::from)
+        .or_else(|| comms_cfg.default_workdir.as_deref().map(crate::config::expand_tilde));
+
     let flush = FlushCadence::from_comms(&comms_cfg);
     // Async jobs post a "Working…" anchor up front; sync/auto rely on the typing
     // indicator until the first content flush.
@@ -307,8 +320,10 @@ pub async fn handle_message(
     let job = {
         let room = room.clone();
         tokio::spawn(async move {
-            run_response_job(room, room_id, messages, llm, bot, profile, model, flush, ack_first)
-                .await;
+            run_response_job(
+                room, room_id, messages, llm, bot, profile, model, flush, ack_first, workdir,
+            )
+            .await;
             workers.remove(job_id);
         })
     };
@@ -354,6 +369,7 @@ async fn run_response_job(
     model: String,
     flush: FlushCadence,
     ack_first: bool,
+    workdir: Option<PathBuf>,
 ) {
     let _ = room.typing_notice(true).await;
     let req_start = Instant::now();
@@ -363,7 +379,21 @@ async fn run_response_job(
         let llm = llm.clone();
         let messages = messages.clone();
         let executor = bot.tool_executor.clone();
-        tokio::spawn(async move { llm.chat_with_tools(&messages, Some(&executor), tx).await })
+        let room_scope = room_id.clone();
+        let wd = workdir.clone();
+        // Task-locals don't cross spawn boundaries, so scope them inside the
+        // producer task: ROOM_ID lets set_workdir target this room; WORKDIR gives
+        // a subprocess backend the room's resolved working directory.
+        tokio::spawn(async move {
+            ROOM_ID
+                .scope(
+                    room_scope,
+                    WORKDIR.scope(wd, async move {
+                        llm.chat_with_tools(&messages, Some(&executor), tx).await
+                    }),
+                )
+                .await
+        })
     };
 
     // For async jobs, post a placeholder anchor immediately so the user sees the
@@ -406,10 +436,10 @@ async fn run_response_job(
 
     let result: anyhow::Result<String> = match streamed {
         Ok(Ok(text)) if !text.trim().is_empty() => Ok(text),
-        Ok(Ok(_)) => llm.chat(&messages).await,
+        Ok(Ok(_)) => WORKDIR.scope(workdir.clone(), llm.chat(&messages)).await,
         Ok(Err(e)) => {
             warn!("stream error, falling back to non-streaming: {}", e);
-            llm.chat(&messages).await
+            WORKDIR.scope(workdir.clone(), llm.chat(&messages)).await
         }
         Err(e) => Err(anyhow::anyhow!("stream task failed: {}", e)),
     };
@@ -700,6 +730,7 @@ mod tests {
             metrics: Arc::new(Metrics::default()),
             tool_executor: Arc::new(ToolExecutor::new(None)),
             workers: Arc::new(Workers::new(4)),
+            room_workdirs: Arc::new(RoomWorkdirStore::load(dir.path().join("rw.json"))),
         }
     }
 

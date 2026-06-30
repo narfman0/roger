@@ -154,9 +154,20 @@ authoritative final string. Auth maps the gateway via `ANTHROPIC_BASE_URL` +
 `ANTHROPIC_AUTH_TOKEN` (the Anthropic key never leaves `srv`). Lifecycle: a
 process-wide semaphore (`max_concurrent_children`), per-line idle timeout,
 wall-clock absolute ceiling, optional `--max-budget-usd`/`--max-turns`, and
-`kill_on_drop` + `process_group(0)` + `killpg` for whole-tree kill. The working
-directory comes from `comms.default_workdir` (per-room/LLM selection lands in a
-later task).
+`kill_on_drop` + `process_group(0)` + `killpg` for whole-tree kill.
+
+### Working directory selection
+
+The agent's cwd is chosen by the LLM, not roger: a `set_workdir(project)` tool
+(in `src/tools.rs`) resolves a name against the `[projects]` map (name → path) and
+records it for the room in `RoomWorkdirStore` (`~/.roger/room_workdirs.json`). Per
+turn the handler resolves the workdir as **room selection → `comms.default_workdir`**
+and passes it to the subprocess via a `WORKDIR` task-local (the room id rides a
+`ROOM_ID` task-local so `set_workdir` knows its target); task-locals avoid
+threading these through the whole chat-call chain. Roger keeps no scratch space and
+leaves no artifacts — the workdir is an external, real project (which may be roger's
+own repo). Because roger's own state lives in `~/.roger`, pointing an agent at the
+repo doesn't expose its Matrix token/crypto store.
 
 ## Orchestrator: comms modes
 

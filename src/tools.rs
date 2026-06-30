@@ -1,8 +1,16 @@
-use anyhow::Result;
+use crate::room_workdirs::RoomWorkdirStore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{info, warn};
+
+tokio::task_local! {
+    /// The room id of the in-flight request, set by the orchestrator around the
+    /// producer task so the `set_workdir` tool knows which room to record against.
+    pub static ROOM_ID: String;
+}
 
 // ── Tool definitions sent to the LLM ────────────────────────────────────────
 
@@ -42,6 +50,23 @@ pub fn tool_definitions() -> Value {
                     "required": ["url"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_workdir",
+                "description": "Set the working directory (project) for this room's agentic coding agent. Call this when the user asks to work on, edit, or build a specific known project. The choice persists for the room until changed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "The name of a known project to work in"
+                        }
+                    },
+                    "required": ["project"]
+                }
+            }
         }
     ])
 }
@@ -67,10 +92,22 @@ pub struct ToolFunction {
 pub struct ToolExecutor {
     http: Client,
     pub searxng_url: Option<String>,
+    /// Known projects (name → expanded path) for the `set_workdir` tool.
+    projects: HashMap<String, String>,
+    /// Persists per-room workdir selections; shared with the handler.
+    room_workdirs: Option<Arc<RoomWorkdirStore>>,
 }
 
 impl ToolExecutor {
     pub fn new(searxng_url: Option<String>) -> Self {
+        Self::with_projects(searxng_url, HashMap::new(), None)
+    }
+
+    pub fn with_projects(
+        searxng_url: Option<String>,
+        projects: HashMap<String, String>,
+        room_workdirs: Option<Arc<RoomWorkdirStore>>,
+    ) -> Self {
         ToolExecutor {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
@@ -78,6 +115,8 @@ impl ToolExecutor {
                 .build()
                 .unwrap_or_default(),
             searxng_url,
+            projects,
+            room_workdirs,
         }
     }
 
@@ -97,7 +136,45 @@ impl ToolExecutor {
                 let url = args["url"].as_str().unwrap_or("").to_string();
                 self.web_fetch(&url).await
             }
+            "set_workdir" => {
+                let project = args["project"].as_str().unwrap_or("").to_string();
+                self.set_workdir(&project)
+            }
             other => format!("error: unknown tool '{}'", other),
+        }
+    }
+
+    /// Resolve a known project name to its path and record it as the in-flight
+    /// room's workdir (read from the `ROOM_ID` task-local). Persists immediately.
+    fn set_workdir(&self, project: &str) -> String {
+        let store = match &self.room_workdirs {
+            Some(s) => s,
+            None => return "error: workdir routing is not configured".into(),
+        };
+        let room = match ROOM_ID.try_with(|r| r.clone()) {
+            Ok(r) => r,
+            Err(_) => return "error: no room context for set_workdir".into(),
+        };
+        let path = match self.projects.get(project) {
+            Some(p) => p.clone(),
+            None => {
+                let mut names: Vec<&String> = self.projects.keys().collect();
+                names.sort();
+                let list = names
+                    .iter()
+                    .map(|n| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return format!(
+                    "error: unknown project '{}'. Known projects: {}",
+                    project,
+                    if list.is_empty() { "(none configured)" } else { &list }
+                );
+            }
+        };
+        match store.set(&room, &path) {
+            Ok(_) => format!("Working directory for this room set to '{}' ({}).", project, path),
+            Err(e) => format!("error: failed to save workdir: {}", e),
         }
     }
 
@@ -315,16 +392,55 @@ mod tests {
         assert!(!out.contains("Title 5"));
     }
 
+    fn workdir_call(project: &str) -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            kind: "function".into(),
+            function: ToolFunction {
+                name: "set_workdir".into(),
+                arguments: format!(r#"{{"project":"{}"}}"#, project),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn set_workdir_records_for_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(RoomWorkdirStore::load(dir.path().join("rw.json")));
+        let mut projects = HashMap::new();
+        projects.insert("foo".to_string(), "/tmp/foo".to_string());
+        let exec = ToolExecutor::with_projects(None, projects, Some(store.clone()));
+
+        let out = ROOM_ID
+            .scope("!room:s".to_string(), exec.execute(&workdir_call("foo")))
+            .await;
+        assert!(out.contains("/tmp/foo"), "got: {}", out);
+        assert_eq!(store.get("!room:s").as_deref(), Some("/tmp/foo"));
+    }
+
+    #[tokio::test]
+    async fn set_workdir_unknown_project_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(RoomWorkdirStore::load(dir.path().join("rw.json")));
+        let exec = ToolExecutor::with_projects(None, HashMap::new(), Some(store.clone()));
+
+        let out = ROOM_ID
+            .scope("!room:s".to_string(), exec.execute(&workdir_call("bar")))
+            .await;
+        assert!(out.starts_with("error: unknown project"), "got: {}", out);
+        assert!(store.get("!room:s").is_none());
+    }
+
     #[test]
     fn tool_definitions_is_valid_json_array() {
         let defs = tool_definitions();
         assert!(defs.is_array());
         let arr = defs.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 3);
         let names: Vec<&str> = arr
             .iter()
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, &["web_search", "web_fetch"]);
+        assert_eq!(names, &["web_search", "web_fetch", "set_workdir"]);
     }
 }

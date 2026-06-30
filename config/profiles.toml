@@ -52,9 +52,15 @@ absolute_ceiling_ms = 1800000
 soft_worker_cap = 4
 max_concurrent_children = 3
 edit_debounce_ms = 600
-# Fallback cwd for agentic subprocess backends when no project workdir is set for
-# the room (host-specific path; ~ is expanded). 4.5.4 adds per-room/LLM selection.
+# Fallback cwd for agentic subprocess backends when no project has been selected
+# for the room (host-specific path; ~ is expanded).
 # default_workdir = "~/projects/scratch"
+
+# Known projects the LLM can switch into via the `set_workdir` tool ("work on foo").
+# The selection persists per-room in ~/.roger/room_workdirs.json. ~ is expanded.
+# [projects]
+# roger = "~/.openclaw/workspace/roger"
+# dotfiles = "~/dotfiles"
 
 # Per-room overrides. require_mention defaults to true globally.
 # Set require_mention = false for rooms where the bot should respond to every message.
