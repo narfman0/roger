@@ -283,8 +283,15 @@ impl SubprocessBackend {
         }
 
         let status = child.wait().await.ok();
+        // If we have valid text, return it even if there was also an error event.
+        // Some runtimes (opencode) emit a transient UnknownError on startup and then
+        // continue to produce a valid response; silently discarding valid output in
+        // favour of the error message causes double-responses and lost replies.
         if let Some(err) = run_error {
-            return Err(anyhow!("{} reported error: {}", program, err));
+            if final_text.is_none() && full.is_empty() {
+                return Err(anyhow!("{} reported error: {}", program, err));
+            }
+            warn!("{} emitted an error event but also produced text; using text (error: {})", program, err);
         }
         if let Some(text) = final_text {
             return Ok(text);

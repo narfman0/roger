@@ -411,9 +411,14 @@ async fn run_response_job(
     let streamed = stream_handle.await;
     let _ = room.typing_notice(false).await;
 
+    // For subprocess (agentic) backends the fallback `llm.chat()` would spawn the
+    // CLI again — producing a second response. Suppress the fallback in that case.
+    let is_subprocess = llm.is_subprocess();
     let result: anyhow::Result<String> = match streamed {
         Ok(Ok(text)) if !text.trim().is_empty() => Ok(text),
+        Ok(Ok(_)) if is_subprocess => Err(anyhow::anyhow!("subprocess produced no output")),
         Ok(Ok(_)) => WORKDIR.scope(workdir.clone(), llm.chat(&messages)).await,
+        Ok(Err(e)) if is_subprocess => Err(e),
         Ok(Err(e)) => {
             warn!("stream error, falling back to non-streaming: {}", e);
             WORKDIR.scope(workdir.clone(), llm.chat(&messages)).await
