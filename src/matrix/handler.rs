@@ -2,7 +2,7 @@ use crate::{
     audio::SpeachesClient,
     config::RoomConfig,
     history::{ChatMessage, HistoryStore},
-    llm::LlmClient,
+    llm::ProfileLlm,
     metrics::Metrics,
     room_profiles::RoomProfileStore,
 };
@@ -35,8 +35,8 @@ const STREAM_EDIT_DEBOUNCE_MS: u64 = 700;
 /// Everything reachable behind `BotCtx::state` is reloadable; fields directly on
 /// `BotCtx` are fixed for the process lifetime.
 pub struct ReloadableState {
-    /// LLM client per profile name (e.g. "chat", "reason", "code").
-    pub llms: HashMap<String, Arc<LlmClient>>,
+    /// LLM (primary + fallbacks) per profile name (e.g. "chat", "reason", "code").
+    pub llms: HashMap<String, Arc<ProfileLlm>>,
     pub system_prompt: String,
     pub room_configs: HashMap<String, RoomConfig>,
     /// Runtime per-room profile overrides set via `/model`, keyed by room id.
@@ -56,10 +56,10 @@ impl ReloadableState {
             .unwrap_or_else(|| "chat".to_string())
     }
 
-    /// Resolve the LLM client for a room. Returns the client and the profile
-    /// name actually used (falls back to "chat" if the requested profile has no
-    /// built client).
-    pub fn llm_for_room(&self, room_id: &str) -> (Arc<LlmClient>, String) {
+    /// Resolve the LLM for a room. Returns the profile LLM and the profile name
+    /// actually used (falls back to "chat" if the requested profile has no built
+    /// client).
+    pub fn llm_for_room(&self, room_id: &str) -> (Arc<ProfileLlm>, String) {
         let requested = self.profile_name_for_room(room_id);
         if let Some(c) = self.llms.get(&requested) {
             return (c.clone(), requested);
@@ -331,9 +331,14 @@ async fn handle_slash_command(body: &str, room_id: &str, ctx: &BotCtx) -> Option
             let history_len = ctx.history.windowed(room_id, 100).len();
             let (client, profile) = ctx.state.read().await.llm_for_room(room_id);
             let m_snap = ctx.metrics.snapshot();
+            let model_desc = if client.fallback_count() > 0 {
+                format!("{} (+{} fallback)", client.model(), client.fallback_count())
+            } else {
+                client.model().to_string()
+            };
             Some(format!(
                 "**Roger status**\nUptime: {}h {}m {}s\nProfile: {} ({})\nHistory: {} messages (this room)\nRequests: {} ({} errors), avg {}ms",
-                h, m, s, profile, client.model(), history_len,
+                h, m, s, profile, model_desc, history_len,
                 m_snap.requests, m_snap.errors, m_snap.avg_latency_ms
             ))
         }
@@ -424,19 +429,20 @@ async fn transcribe_audio(
 mod tests {
     use super::*;
     use crate::history::HistoryStore;
+    use crate::llm::LlmClient;
     use crate::room_profiles::RoomProfileStore;
     use std::collections::HashSet;
     use tempfile::TempDir;
 
-    fn client(model: &str) -> Arc<LlmClient> {
-        Arc::new(LlmClient::new(
+    fn client(model: &str) -> Arc<ProfileLlm> {
+        Arc::new(ProfileLlm::new(vec![Arc::new(LlmClient::new(
             "http://localhost/v1".into(),
             model.into(),
             None,
             128,
             0.0,
             8192,
-        ))
+        ))]))
     }
 
     fn state() -> ReloadableState {

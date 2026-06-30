@@ -97,14 +97,14 @@ async fn main() -> Result<()> {
     info!("roger starting — homeserver: {}", cfg.matrix_homeserver);
     info!("allowlist: {:?}", cfg.room_allowlist);
 
-    // Build an LLM client per profile (chat required; others skipped if unbuildable)
-    let llms: HashMap<String, Arc<llm::LlmClient>> = cfg
+    // Build an LLM per profile (primary + fallbacks; chat required)
+    let llms: HashMap<String, Arc<llm::ProfileLlm>> = cfg
         .build_all_llms()?
         .into_iter()
         .map(|(k, v)| (k, Arc::new(v)))
         .collect();
     for (name, client) in &llms {
-        info!("profile '{}' → model {}", name, client.model());
+        info!("profile '{}' → {}", name, client.model_chain().join(" → "));
     }
 
     // Build speaches client if configured

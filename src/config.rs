@@ -49,6 +49,10 @@ impl Default for BackendKind {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileConfig {
     pub backend: String,
+    /// Ordered fallback backend names, tried (in order) when the primary
+    /// `backend` is unreachable or errors. Same profile params apply to each.
+    #[serde(default)]
+    pub fallback: Vec<String>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -259,18 +263,15 @@ impl Config {
         })
     }
 
-    pub fn backend_for_profile(&self, profile: &str) -> anyhow::Result<&BackendConfig> {
-        let p = self.profiles.get(profile)
-            .ok_or_else(|| anyhow::anyhow!("unknown profile: {}", profile))?;
-        self.backends.get(&p.backend)
-            .ok_or_else(|| anyhow::anyhow!("unknown backend '{}' for profile '{}'", p.backend, profile))
-    }
-
-    /// Build the LLM client for a single named profile.
-    pub fn build_llm_for_profile(&self, profile_name: &str) -> anyhow::Result<crate::llm::LlmClient> {
-        let backend = self.backend_for_profile(profile_name)?;
-        let profile = self.profiles.get(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown profile: {}", profile_name))?;
+    /// Build one LLM client for a named backend, applying the given profile's
+    /// generation params (temperature, max_tokens, context_tokens).
+    fn build_client(
+        &self,
+        backend_name: &str,
+        profile: &ProfileConfig,
+    ) -> anyhow::Result<crate::llm::LlmClient> {
+        let backend = self.backends.get(backend_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown backend '{}'", backend_name))?;
         let base_url = format!(
             "{}/v1",
             backend.base_url.trim_end_matches('/').trim_end_matches("/v1")
@@ -285,24 +286,47 @@ impl Config {
         ))
     }
 
-    /// Build an LLM client for every defined profile. Profiles that fail to build
-    /// (e.g. a backend missing on this host) are skipped with a warning rather
-    /// than aborting startup. The "chat" profile is required and must build.
-    /// Shared by startup and config hot-reload.
-    pub fn build_all_llms(&self) -> anyhow::Result<HashMap<String, crate::llm::LlmClient>> {
-        let mut clients = HashMap::new();
+    /// Build the `ProfileLlm` for a named profile: its primary backend followed by
+    /// any `fallback` backends, in order. Backends that don't exist on this host
+    /// are skipped with a warning; the profile fails only if none are usable.
+    pub fn build_profile_llm(&self, profile_name: &str) -> anyhow::Result<crate::llm::ProfileLlm> {
+        let profile = self.profiles.get(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown profile: {}", profile_name))?;
+        let mut names = vec![profile.backend.clone()];
+        names.extend(profile.fallback.iter().cloned());
+
+        let mut clients = Vec::new();
+        for name in &names {
+            match self.build_client(name, profile) {
+                Ok(c) => clients.push(std::sync::Arc::new(c)),
+                Err(e) => {
+                    tracing::warn!("profile '{}': skipping backend '{}': {}", profile_name, name, e)
+                }
+            }
+        }
+        if clients.is_empty() {
+            anyhow::bail!("profile '{}' has no usable backend", profile_name);
+        }
+        Ok(crate::llm::ProfileLlm::new(clients))
+    }
+
+    /// Build a `ProfileLlm` for every defined profile. Profiles with no usable
+    /// backend are skipped with a warning rather than aborting startup. The "chat"
+    /// profile is required. Shared by startup and config hot-reload.
+    pub fn build_all_llms(&self) -> anyhow::Result<HashMap<String, crate::llm::ProfileLlm>> {
+        let mut profiles = HashMap::new();
         for name in self.profiles.keys() {
-            match self.build_llm_for_profile(name) {
-                Ok(client) => {
-                    clients.insert(name.clone(), client);
+            match self.build_profile_llm(name) {
+                Ok(p) => {
+                    profiles.insert(name.clone(), p);
                 }
                 Err(e) => tracing::warn!("skipping profile '{}': {}", name, e),
             }
         }
-        if !clients.contains_key("chat") {
+        if !profiles.contains_key("chat") {
             anyhow::bail!("the 'chat' profile is required but failed to build");
         }
-        Ok(clients)
+        Ok(profiles)
     }
 }
 

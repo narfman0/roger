@@ -2,7 +2,9 @@ use crate::history::ChatMessage;
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
@@ -196,6 +198,74 @@ impl LlmClient {
     }
 }
 
+/// An LLM profile backed by an ordered chain of clients: a primary and zero or
+/// more fallbacks. Each call tries clients in order, advancing to the next only
+/// when one fails to produce a response (transport error or non-2xx). A client
+/// that returns successfully — even with empty text — ends the chain.
+pub struct ProfileLlm {
+    clients: Vec<Arc<LlmClient>>,
+}
+
+impl ProfileLlm {
+    /// `clients` must be non-empty, primary first.
+    pub fn new(clients: Vec<Arc<LlmClient>>) -> Self {
+        debug_assert!(!clients.is_empty(), "ProfileLlm requires at least one client");
+        ProfileLlm { clients }
+    }
+
+    /// The primary model name (shown in `/status` and logs).
+    pub fn model(&self) -> &str {
+        self.clients[0].model()
+    }
+
+    /// Number of fallback clients behind the primary.
+    pub fn fallback_count(&self) -> usize {
+        self.clients.len().saturating_sub(1)
+    }
+
+    /// Model names in priority order (primary first).
+    pub fn model_chain(&self) -> Vec<String> {
+        self.clients.iter().map(|c| c.model().to_string()).collect()
+    }
+
+    /// History token budget, sized from the primary client.
+    pub fn history_token_budget(&self, system_prompt_tokens: usize) -> usize {
+        self.clients[0].history_token_budget(system_prompt_tokens)
+    }
+
+    pub async fn chat(&self, messages: &[ChatMessage]) -> Result<String> {
+        let mut last_err = None;
+        for (i, c) in self.clients.iter().enumerate() {
+            match c.chat(messages).await {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    warn!(model = %c.model(), "backend {} failed: {}", i, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no backends configured")))
+    }
+
+    pub async fn chat_stream(
+        &self,
+        messages: &[ChatMessage],
+        tx: mpsc::Sender<String>,
+    ) -> Result<String> {
+        let mut last_err = None;
+        for (i, c) in self.clients.iter().enumerate() {
+            match c.chat_stream(messages, tx.clone()).await {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    warn!(model = %c.model(), "streaming backend {} failed: {}", i, e);
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no backends configured")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +308,52 @@ mod tests {
     #[test]
     fn sse_handles_empty_choices() {
         assert_eq!(parse_sse_line(r#"data: {"choices":[]}"#), None);
+    }
+
+    fn dead_client(model: &str) -> Arc<LlmClient> {
+        // Port 9 (discard) refuses connections — a reliable transport failure.
+        Arc::new(LlmClient::new(
+            "http://127.0.0.1:9/v1".into(),
+            model.into(),
+            None,
+            64,
+            0.0,
+            4096,
+        ))
+    }
+
+    #[test]
+    fn profile_llm_reports_chain_and_fallback_count() {
+        let p = ProfileLlm::new(vec![dead_client("primary"), dead_client("backup")]);
+        assert_eq!(p.model(), "primary");
+        assert_eq!(p.fallback_count(), 1);
+        assert_eq!(p.model_chain(), vec!["primary".to_string(), "backup".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn profile_llm_errors_when_all_backends_fail() {
+        let p = ProfileLlm::new(vec![dead_client("primary"), dead_client("backup")]);
+        let (tx, _rx) = mpsc::channel(8);
+        assert!(p.chat_stream(&[ChatMessage::user("hi")], tx).await.is_err());
+        assert!(p.chat(&[ChatMessage::user("hi")]).await.is_err());
+    }
+
+    // Live failover check: dead primary, real Ollama fallback. Run with
+    //   cargo test --release falls_over_to_live_backend -- --ignored
+    #[tokio::test]
+    #[ignore = "requires a local Ollama at 127.0.0.1:11434 with model gemma4:31b"]
+    async fn falls_over_to_live_backend() {
+        let primary = dead_client("dead");
+        let fallback = Arc::new(LlmClient::new(
+            "http://127.0.0.1:11434/v1".into(),
+            "gemma4:31b".into(),
+            None,
+            1024,
+            0.0,
+            8192,
+        ));
+        let p = ProfileLlm::new(vec![primary, fallback]);
+        let out = p.chat(&[ChatMessage::user("Reply with exactly: ok")]).await.unwrap();
+        assert!(!out.trim().is_empty(), "fallback should produce a response");
     }
 }

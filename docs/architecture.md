@@ -63,10 +63,20 @@ All cloud LLM calls go through a LiteLLM Docker container on `srv:4000`. This:
 
 ## Profile routing
 
-`ReloadableState` holds one `LlmClient` per profile (`llms: HashMap<profile, client>`),
-built from `profiles.toml` at startup and on reload. A profile that fails to build
-(e.g. its backend is missing on this host) is skipped with a warning; `chat` is
-required.
+`ReloadableState` holds one `ProfileLlm` per profile (`llms: HashMap<profile, ProfileLlm>`),
+built from `profiles.toml` at startup and on reload. A profile that has no usable
+backend is skipped with a warning; `chat` is required.
+
+### Fallback chains
+
+A `ProfileLlm` wraps an ordered list of clients: the profile's primary `backend`
+followed by its `fallback` backends (same profile params, different provider). Each
+`chat`/`chat_stream` call tries clients in order, advancing to the next only on a
+transport error or non-2xx status; the first client that responds (even with empty
+text) ends the chain. This lets a local profile fail over to a cloud provider — e.g.
+`chat` runs on LM Studio but falls back to Anthropic via the gateway when LM Studio
+is down. Streaming falls over too: failure happens on connect (before any token is
+sent), so the user never sees a half-stream from a dead backend.
 
 Each room resolves to a profile via `ReloadableState::llm_for_room`:
 1. a runtime `/model` override (`room_profiles`), else

@@ -105,7 +105,8 @@ better context handling, streaming, and observability.
 | 3 | History token budgeting | ✅ Done |
 | 4 | Streaming responses (debounced ack edits) | ✅ Done |
 | 5 | Metrics: request counts, latency, error rate | ✅ Done |
-| 6 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | 📋 deferred |
+| 6 | Per-profile primary + fallback backends | ✅ Done |
+| 7 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | 📋 deferred |
 
 ## Completed
 
@@ -146,3 +147,12 @@ raise `max_tokens`/`context_tokens` for those profiles.
 and average latency. Each response records latency + outcome and emits a structured
 `responded` log line (room/profile/model/latency_ms/ok), so the JSON log sink works
 as a scrape source. `/status` shows live totals. Counters reset on restart.
+
+### Fallback backends (#6)
+A profile's single backend became a chain: `backend` (primary) + an ordered
+`fallback` list. `ProfileLlm` (`src/llm.rs`) tries each client in order, advancing
+only on transport/non-2xx failure; the first responder wins. Streaming fails over
+on connect, before any token is shown. The `chat` profile now falls back to
+Anthropic (`cloud-fast`) so it survives LM Studio being down. `/status` shows the
+fallback count; startup logs the model chain. Live failover verified against Ollama
+(`falls_over_to_live_backend`, an `#[ignore]` test).

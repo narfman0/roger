@@ -1,5 +1,8 @@
 [profiles.chat]
 backend = "local-small"
+# Tried in order if the primary backend is unreachable/errors. cloud-fast routes
+# to Anthropic via the LiteLLM gateway, so chat keeps working if LM Studio is down.
+fallback = ["cloud-fast"]
 temperature = 0.7
 max_tokens = 1024
 # Approximate model context window; sizes the history token budget. Default 8192.
