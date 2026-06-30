@@ -103,7 +103,7 @@ better context handling, streaming, and observability.
 | 1 | Profile routing (per-room profile → LLM client) | ✅ Done |
 | 2 | `/model <profile>` runtime per-room switch | ✅ Done |
 | 3 | History token budgeting | ✅ Done |
-| 4 | Streaming responses (debounced ack edits) | ⏳ |
+| 4 | Streaming responses (debounced ack edits) | ✅ Done |
 | 5 | Metrics: request counts, latency, error rate | ⏳ |
 | 6 | Multi-backend dispatch: `claude-code` / `open-code` subprocess kinds | 📋 deferred |
 
@@ -130,3 +130,13 @@ window. `HistoryStore::windowed_by_tokens` keeps the most recent messages that f
 a budget (estimated at ~4 chars/token), always keeping the latest turn. The budget
 is derived per-room from the resolved profile's `context_tokens` (new config field,
 default 8192) minus the response reservation, system prompt, and a safety margin.
+
+### Streaming responses (#4)
+Responses now stream: `LlmClient::chat_stream` sends `stream: true`, parses the SSE
+deltas (`parse_sse_line`), accumulates `content`, and pushes the running text over
+an mpsc channel. The handler edits the ack in place as text grows, debounced to one
+edit per 700ms (`STREAM_EDIT_DEBOUNCE_MS`). If the stream errors or yields nothing,
+it falls back to a non-streaming `chat()`. Reasoning-model `reasoning` deltas are
+ignored. Verified against a live Ollama endpoint. Note: reasoning models with a
+small `max_tokens` may spend the whole budget thinking and emit no `content` —
+raise `max_tokens`/`context_tokens` for those profiles.

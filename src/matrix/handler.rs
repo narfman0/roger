@@ -18,9 +18,17 @@ use matrix_sdk::{
     },
     Client,
 };
-use std::{collections::HashMap, sync::Arc, time::Instant};
-use tokio::sync::RwLock;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
+
+/// Minimum gap between in-place ack edits while streaming a response, so a fast
+/// token stream doesn't spam the room with edit events.
+const STREAM_EDIT_DEBOUNCE_MS: u64 = 700;
 
 /// Config that can be swapped at runtime on SIGHUP without restarting the bot.
 /// Everything reachable behind `BotCtx::state` is reloadable; fields directly on
@@ -211,10 +219,44 @@ pub async fn handle_message(
     let mut messages = vec![ChatMessage::system(&system_prompt)];
     messages.extend(ctx.history.windowed_by_tokens(&room_id, budget));
 
-    // Call LLM with full room history
-    let result = llm.chat(&messages).await;
+    // Stream the LLM response, editing the ack in place as tokens arrive
+    // (debounced to avoid flooding the room with edit events).
+    let (tx, mut rx) = mpsc::channel::<String>(64);
+    let stream_handle = {
+        let llm = llm.clone();
+        let messages = messages.clone();
+        tokio::spawn(async move { llm.chat_stream(&messages, tx).await })
+    };
 
+    let debounce = Duration::from_millis(STREAM_EDIT_DEBOUNCE_MS);
+    let mut last_edit: Option<Instant> = None;
+    let mut shown = String::new();
+    while let Some(acc) = rx.recv().await {
+        if acc != shown && last_edit.map_or(true, |t| t.elapsed() >= debounce) {
+            shown = acc;
+            let edited = RoomMessageEventContent::text_plain(&shown)
+                .make_replacement(ReplacementMetadata::new(ack_id.clone(), None), None);
+            if let Err(e) = room.send(edited).await {
+                warn!("failed to edit ack mid-stream: {}", e);
+            }
+            last_edit = Some(Instant::now());
+        }
+    }
+
+    let streamed = stream_handle.await;
     let _ = room.typing_notice(false).await;
+
+    // Resolve the final text: the streamed result, falling back to a non-streaming
+    // request if the stream errored or produced nothing (backend without SSE support).
+    let result: anyhow::Result<String> = match streamed {
+        Ok(Ok(text)) if !text.trim().is_empty() => Ok(text),
+        Ok(Ok(_)) => llm.chat(&messages).await,
+        Ok(Err(e)) => {
+            warn!("stream error, falling back to non-streaming: {}", e);
+            llm.chat(&messages).await
+        }
+        Err(e) => Err(anyhow::anyhow!("stream task failed: {}", e)),
+    };
 
     match result {
         Ok(reply) => {

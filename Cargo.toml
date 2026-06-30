@@ -16,7 +16,8 @@ tracing-appender = "0.2"
 thiserror = "1"
 anyhow = "1"
 dotenvy = "0.15"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+futures-util = "0.3"
 chrono = "0.4"
 
 [dev-dependencies]

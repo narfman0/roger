@@ -37,9 +37,15 @@ where `context_tokens` is a per-profile config value (default 8192).
 For every response:
 1. `room.typing_notice(true)` — shows the typing indicator in Matrix clients
 2. Send "Working on it…" immediately — user sees activity before LLM responds
-3. Call LLM with room history
-4. Edit the ack message in-place via `m.replace` (ruma `ReplacementMetadata`) — no extra messages accumulate
-5. `room.typing_notice(false)`
+3. Stream the LLM response (`LlmClient::chat_stream`): SSE deltas are accumulated
+   and pushed over an mpsc channel; the handler edits the ack in place via
+   `m.replace` as text grows, debounced to one edit per `STREAM_EDIT_DEBOUNCE_MS`
+   (700ms) so a fast stream doesn't flood the room with edit events
+4. Final edit with the complete reply; `room.typing_notice(false)`
+
+If the stream errors or yields no content (e.g. a backend without SSE support),
+the handler falls back to a single non-streaming `chat()` call. Only the `content`
+field is surfaced — reasoning-model `reasoning` deltas are ignored.
 
 ## Audio pipeline
 

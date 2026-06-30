@@ -2283,6 +2283,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dotenvy",
+ "futures-util",
  "matrix-sdk",
  "reqwest",
  "serde",
