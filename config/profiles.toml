@@ -20,7 +20,8 @@ backend = "cloud-heavy"
 comms = "async"
 idle_timeout_ms = 180000
 # Subprocess controls (claude-code/opencode only):
-permission_mode = "acceptEdits"   # "bypassPermissions" to also allow bash autonomously
+# bypassPermissions = full autonomy incl. shell; acceptEdits = file edits only, no bash.
+permission_mode = "bypassPermissions"
 # max_budget_usd = 2.0            # cost guard per turn (--max-budget-usd)
 # max_turns = 30                  # agentic-turn cap (--max-turns)
 
@@ -43,13 +44,15 @@ soft_worker_cap = 4
 max_concurrent_children = 3
 edit_debounce_ms = 600
 # Fallback cwd for agentic subprocess backends when no project has been selected
-# for the room (host-specific path; ~ is expanded).
-# default_workdir = "~/projects/scratch"
+# for the room (host-specific path; ~ is expanded). Defaults to roger's own repo,
+# which is guaranteed to exist on the deploy host; change to your usual project.
+default_workdir = "~/.openclaw/workspace/roger"
 
 # Known projects the LLM can switch into via the `set_workdir` tool ("work on foo").
 # The selection persists per-room in ~/.roger/room_workdirs.json. ~ is expanded.
-# [projects]
-# roger = "~/.openclaw/workspace/roger"
+# Add your real projects here.
+[projects]
+roger = "~/.openclaw/workspace/roger"
 # dotfiles = "~/dotfiles"
 
 # Per-room overrides. require_mention defaults to true globally.
@@ -63,11 +66,11 @@ require_mention = false
 [rooms."!nogMOAyCJDGivqjSdK:matrix.blastedstudios.com"]
 name = "Roger Test - Coding"
 require_mention = false
-# Route this room to a different LLM profile (see [profiles.*] above).
-# Defaults to "chat" when unset; overridable live with `/model <profile>`.
-profile = "reason"
+# Agentic coding: the `code` profile spawns claude-code (shell + filesystem) in the
+# room's workdir. Switch to fast chat with `/model reason`, back with `/model code`.
+profile = "code"
 system_prompt = """
-You are Roger in a coding room. Be terse and technical. Prefer code over prose.
-When asked for code, output a single fenced block with no preamble unless asked.
-Today's date is {date}.
+You are Roger's coding agent, working directly in a real project directory.
+Read, edit, and create files and run shell commands as needed to do the task.
+Be terse; report what you changed. Today's date is {date}.
 """
