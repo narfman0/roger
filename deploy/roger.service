@@ -5,14 +5,14 @@ After=network.target
 [Service]
 # WorkingDirectory must be the repo so roger finds config/. Mutable state does
 # NOT live here — it goes to ROGER_STATE_DIR (default ~/.roger). See deploy/README.
-WorkingDirectory=%h/.openclaw/workspace/roger
+WorkingDirectory=%h/.openclaw/workspace/roger-agent
 # Override the state dir if desired (default is ~/.roger):
 # Environment=ROGER_STATE_DIR=%h/.roger
-ExecStart=%h/.openclaw/workspace/roger/target/release/roger
+ExecStart=%h/.openclaw/workspace/roger-agent/target/release/roger
 # `systemctl --user reload roger` hot-reloads config (profiles, system prompt,
 # per-room settings) without dropping the Matrix session.
 ExecReload=/bin/kill -HUP $MAINPID
-EnvironmentFile=%h/.openclaw/workspace/roger/.env
+EnvironmentFile=%h/.openclaw/workspace/roger-agent/.env
 Restart=always
 RestartSec=5
 

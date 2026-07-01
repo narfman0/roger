@@ -52,13 +52,13 @@ edit_debounce_ms = 600
 # Fallback cwd for agentic subprocess backends when no project has been selected
 # for the room (host-specific path; ~ is expanded). Defaults to roger's own repo,
 # which is guaranteed to exist on the deploy host; change to your usual project.
-default_workdir = "~/.openclaw/workspace/roger"
+default_workdir = "~/.openclaw/workspace/roger-agent"
 
 # Known projects the LLM can switch into via the `set_workdir` tool ("work on foo").
 # The selection persists per-room in ~/.roger/room_workdirs.json. ~ is expanded.
 # Add your real projects here.
 [projects]
-roger = "~/.openclaw/workspace/roger"
+roger = "~/.openclaw/workspace/roger-agent"
 # dotfiles = "~/dotfiles"
 
 # Per-room overrides. require_mention defaults to true globally.
