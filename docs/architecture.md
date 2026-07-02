@@ -49,8 +49,10 @@ plus `rooms/<room>.md`) via `MemoryStore`; it is written by compaction and survi
 
 ## Compaction
 
-When a room's history exceeds `[compaction].trigger_tokens`, the response handler
-spawns a **detached** compaction task (`src/compaction.rs`, guarded so a room is
+When a room's history exceeds the compaction trigger — `[compaction].trigger_fraction`
+of that room profile's history window (default 0.8), or the absolute
+`[compaction].trigger_tokens` if non-zero — the response handler spawns a
+**detached** compaction task (`src/compaction.rs`, guarded so a room is
 never compacted twice at once). It keeps the last `keep_recent_turns` verbatim,
 sends the older turns to the `[compaction].profile` LLM, and parses a three-section
 reply: a **summary**, **room-specific** durable facts, and **broadly-useful** facts.

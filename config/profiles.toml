@@ -5,12 +5,16 @@ backend = "local-small"
 fallback = ["cloud-fast"]
 temperature = 0.7
 max_tokens = 1024
-# Approximate model context window; sizes the history token budget. Default 8192.
-context_tokens = 8192
+# How much history we send (sizes the history budget). NOTE: chat/reason run on
+# gemma via ollama, which serves its default num_ctx (~4k) unless you set
+# OLLAMA_CONTEXT_LENGTH=65536 on the ollama service — otherwise gemma truncates
+# server-side. The cloud/claude-code profiles get the full window regardless.
+context_tokens = 64000
 comms = "sync"
 
 [profiles.fast]
 backend = "cloud-fast"
+context_tokens = 64000
 comms = "sync"
 
 # cloud-heavy is a kind = "claude-code" backend (see backends.example.toml): each
@@ -28,10 +32,12 @@ permission_mode = "bypassPermissions"
 [profiles.reason]
 backend = "local-small"      # gemma via Ollama (local)
 fallback = ["cloud-heavy"]   # opus (via gateway) when Ollama is unavailable
+context_tokens = 64000       # see chat re: OLLAMA_CONTEXT_LENGTH for gemma
 comms = "auto"
 
 [profiles.research]
 backend = "cloud-fast"
+context_tokens = 64000
 comms = "auto"
 
 [profiles.opencode]
@@ -55,12 +61,14 @@ enabled = true
 max_global_tokens = 1500
 max_room_tokens = 3000
 
-# Size-triggered conversation compaction: when a room's history exceeds
-# trigger_tokens, summarize the older turns into a head summary and distill durable
-# facts into memory, keeping keep_recent_turns verbatim. `profile` picks a cheap LLM.
+# Size-triggered conversation compaction. Triggers at trigger_fraction of the
+# room's own history window (so it scales with each profile's context_tokens),
+# summarizing older turns into a head summary and distilling durable facts into
+# memory while keeping keep_recent_turns verbatim. `profile` picks a cheap LLM.
 [compaction]
 enabled = true
-trigger_tokens = 6000
+trigger_fraction = 0.8   # e.g. ~51k for a 64k window
+# trigger_tokens = 0     # absolute override; 0 = use trigger_fraction
 keep_recent_turns = 8
 profile = "fast"
 

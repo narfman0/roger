@@ -538,13 +538,24 @@ async fn run_response_job(
 /// compaction task (summarize old turns + distill memory). Fast to call: it only
 /// reads config + the history size, then spawns.
 async fn maybe_compact(bot: &BotCtx, room_id: &str) {
-    let (cfg, llm, max_global, max_room) = {
+    let (cfg, llm, room_budget, max_global, max_room) = {
         let st = bot.state.read().await;
         let cfg = st.compaction.clone();
+        // The trigger scales with the room's own model window.
+        let (room_llm, _) = st.llm_for_room(room_id);
+        let room_budget = room_llm.history_token_budget(0);
         let llm = st.llms.get(&cfg.profile).cloned();
-        (cfg, llm, st.memory_max_global_tokens, st.memory_max_room_tokens)
+        (cfg, llm, room_budget, st.memory_max_global_tokens, st.memory_max_room_tokens)
     };
-    if !cfg.enabled || bot.history.token_count(room_id) <= cfg.trigger_tokens {
+    if !cfg.enabled {
+        return;
+    }
+    let trigger = if cfg.trigger_tokens > 0 {
+        cfg.trigger_tokens
+    } else {
+        (room_budget as f32 * cfg.trigger_fraction) as usize
+    };
+    if bot.history.token_count(room_id) <= trigger {
         return;
     }
     let Some(llm) = llm else {

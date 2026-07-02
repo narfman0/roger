@@ -222,14 +222,18 @@ impl Default for MemoryConfig {
     }
 }
 
-/// Size-triggered conversation compaction: when a room's history exceeds
-/// `trigger_tokens`, summarize the older turns and distill durable facts into
-/// memory, keeping the most recent turns verbatim.
+/// Size-triggered conversation compaction. The trigger scales with the room's own
+/// history window: compact when history exceeds `trigger_fraction` of that window.
+/// `trigger_tokens`, if non-zero, is an absolute override instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompactionConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_trigger_tokens")]
+    /// Fraction of the room profile's history budget at which to compact.
+    #[serde(default = "default_trigger_fraction")]
+    pub trigger_fraction: f32,
+    /// Absolute token trigger; `0` means "use `trigger_fraction`".
+    #[serde(default)]
     pub trigger_tokens: usize,
     #[serde(default = "default_keep_recent")]
     pub keep_recent_turns: usize,
@@ -238,7 +242,7 @@ pub struct CompactionConfig {
     pub profile: String,
 }
 
-fn default_trigger_tokens() -> usize { 6000 }
+fn default_trigger_fraction() -> f32 { 0.8 }
 fn default_keep_recent() -> usize { 8 }
 fn default_compaction_profile() -> String { "fast".to_string() }
 
@@ -246,7 +250,8 @@ impl Default for CompactionConfig {
     fn default() -> Self {
         CompactionConfig {
             enabled: true,
-            trigger_tokens: default_trigger_tokens(),
+            trigger_fraction: default_trigger_fraction(),
+            trigger_tokens: 0,
             keep_recent_turns: default_keep_recent(),
             profile: default_compaction_profile(),
         }

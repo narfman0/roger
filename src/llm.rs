@@ -340,7 +340,7 @@ impl Backend {
             Backend::Http(c) => c.history_token_budget(system_prompt_tokens),
             // The subprocess CLI manages its own context; size the transcript we
             // hand it generously and let it compact as needed.
-            Backend::Subprocess(_) => 32_000,
+            Backend::Subprocess(_) => 64_000,
         }
     }
 
